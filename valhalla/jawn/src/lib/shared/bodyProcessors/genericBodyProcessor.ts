@@ -49,12 +49,11 @@ export class GenericBodyProcessor implements IBodyProcessor {
       usage: {
         prompt_tokens?: number;
         completion_tokens?: number;
-        input_tokens?: number;
-        output_tokens?: number;
         total_tokens?: number;
         prompt_tokens_details?: {
           cached_tokens?: number;
           audio_tokens?: number;
+          cache_write_tokens?: number;
         };
         completion_tokens_details?: {
           reasoning_tokens?: number;
@@ -62,29 +61,45 @@ export class GenericBodyProcessor implements IBodyProcessor {
           accepted_prediction_tokens?: number;
           rejected_prediction_tokens?: number;
         };
+        
+        // OpenAI Responses API
+        input_tokens?: number;
+        output_tokens?: number;
+        input_tokens_details?: {
+          cached_tokens?: number;
+        };
+        output_tokens_details?: {
+          reasoning_tokens?: number;
+        };
+
+        // OpenRouter
+        cost?: number;
       };
     };
 
     // OpenAI charges for input, input cache read, output, output audio, input audio.
+    // Guard: if cached > prompt_tokens, data is already non-cached (Anthropic convention)
     const usage = response.usage;
-    const effectivePromptTokens = usage?.prompt_tokens !== undefined
-        ? Math.max(0, (usage.prompt_tokens ?? 0) - (usage.prompt_tokens_details?.cached_tokens ?? 0) - (usage.prompt_tokens_details?.audio_tokens ?? 0))
-        : usage?.input_tokens;
+    const gPromptToks = usage?.prompt_tokens ?? usage?.input_tokens ?? 0;
+    const gCachedToks = usage?.prompt_tokens_details?.cached_tokens ?? usage?.input_tokens_details?.cached_tokens ?? 0;
+    const gAudioToks = usage?.prompt_tokens_details?.audio_tokens ?? 0;
+    const effectivePromptTokens = gCachedToks > gPromptToks
+        ? Math.max(0, gPromptToks - gAudioToks)
+        : Math.max(0, gPromptToks - gCachedToks - gAudioToks);
     const effectiveCompletionTokens = usage?.completion_tokens !== undefined
-        ? Math.max(0, (usage.completion_tokens ?? 0) - (usage.completion_tokens_details?.audio_tokens ?? 0))
-        : usage?.output_tokens;
-
+        ? Math.max(0, (usage.completion_tokens ?? 0) - (usage.completion_tokens_details?.reasoning_tokens ?? 0) - (usage.completion_tokens_details?.audio_tokens ?? 0))
+        : Math.max(0, (usage.output_tokens ?? 0) - (usage.output_tokens_details?.reasoning_tokens ?? 0));
+    
     return {
       promptTokens: effectivePromptTokens,
-      // promptCacheWriteTokens, not explicitly provided in OpenAI spec response.
-      // While this isn't technically our problem, its worth noting that providers like OpenRouter
-      // provide Claude models which DO charge for cache writes.
-      // Its easy to calculate per provider, (e.g Claude does it as 128 token increments), but not generally.
-      // If the schema is every updated, this needs to be promptly updated.
-      promptCacheReadTokens: usage?.prompt_tokens_details?.cached_tokens,
+      promptCacheReadTokens: usage?.prompt_tokens_details?.cached_tokens ?? usage?.input_tokens_details?.cached_tokens ?? 0,
+      promptCacheWriteTokens: usage?.prompt_tokens_details?.cache_write_tokens ?? 0,
       completionTokens: effectiveCompletionTokens,
       totalTokens: usage?.total_tokens,
       heliconeCalculated: false,
+
+      // OpenRouter may contain these fields based on wallet/BYOK setup
+      cost: usage?.cost
     };
   }
 }

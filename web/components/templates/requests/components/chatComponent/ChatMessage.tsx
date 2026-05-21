@@ -1,4 +1,3 @@
-import MarkdownEditor from "@/components/shared/markdownEditor";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { logger } from "@/lib/telemetry/logger";
@@ -131,7 +130,7 @@ const ContentWrapper = ({
 };
 
 const renderToolMessage = (
-  content: string,
+  displayContent: string,
   message: Message,
   playgroundMode: boolean,
   mappedRequest?: MappedLLMRequest,
@@ -142,6 +141,7 @@ const renderToolMessage = (
     return (
       <ToolMessage
         message={message}
+        displayContent={displayContent}
         playgroundMode={playgroundMode}
         mappedRequest={mappedRequest}
         messageIndex={messageIndex}
@@ -163,7 +163,7 @@ const renderToolMessage = (
     );
   }
   try {
-    const parsedContent = JSON.parse(content);
+    const parsedContent = JSON.parse(displayContent);
     return (
       <div className="rounded-lg bg-muted p-4">
         <JsonRenderer data={parsedContent} />
@@ -172,7 +172,7 @@ const renderToolMessage = (
   } catch {
     return (
       <pre className="whitespace-pre-wrap break-words p-4 text-xs">
-        {content}
+        {displayContent}
       </pre>
     );
   }
@@ -192,6 +192,7 @@ const ImageContent: React.FC<{
   const [isModalOpen, setIsModalOpen] = useState(false);
 
   let imageSrc = message.image_url;
+
   if (message.content && message.mime_type?.startsWith("image/")) {
     imageSrc = `data:${message.mime_type};base64,${message.content}`;
   } else if (message.content && !message.mime_type) {
@@ -204,7 +205,9 @@ const ImageContent: React.FC<{
     imageSrc = `data:image/png;base64,${message.content}`;
   }
 
-  if (!imageSrc) return null;
+  if (!imageSrc) {
+    return null;
+  }
 
   const processedImageSrc = imageSrc.includes("base64,")
     ? base64UrlToBase64(imageSrc)
@@ -212,8 +215,13 @@ const ImageContent: React.FC<{
       ? imageSrc
       : null;
 
-  if (!processedImageSrc) return null;
+  if (!processedImageSrc) {
+    return null;
+  }
 
+  // Use unoptimized for data URLs to avoid Next.js image optimization issues
+  const isDataUrl = processedImageSrc.startsWith("data:");
+  
   const imageElement = (
     <div className="relative w-full max-w-md">
       <Image
@@ -225,6 +233,7 @@ const ImageContent: React.FC<{
         sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
         onClick={() => setIsModalOpen(true)}
         title="Click to view full size"
+        unoptimized={isDataUrl}
       />
     </div>
   );
@@ -267,13 +276,14 @@ const renderTextContent = (
   chatMode: ChatMode,
   mappedRequest: MappedLLMRequest,
   messageIndex: number,
-  mode: "rendered" | "raw" | "json" | "debug",
+  mode: "rendered" | "chat" | "raw" | "json" | "debug",
   options: {
     isPartOfContentArray?: boolean;
     parentIndex?: number;
     onChatChange?: (_mappedRequest: MappedLLMRequest) => void;
     showDeleteButton?: boolean;
     onDelete?: () => void;
+    showAnnotations?: boolean;
   } = {},
 ) => {
   const textElement = (
@@ -287,6 +297,8 @@ const renderTextContent = (
       messageIndex={messageIndex}
       onChatChange={options.onChatChange}
       mode={mode}
+      annotations={message.annotations}
+      showAnnotations={options.showAnnotations}
     />
   );
 
@@ -343,13 +355,14 @@ const renderContentByType = (
   chatMode: ChatMode,
   mappedRequest: MappedLLMRequest,
   messageIndex: number,
-  mode: "rendered" | "raw" | "json" | "debug",
+  mode: "rendered" | "chat" | "raw" | "json" | "debug",
   options: {
     isPartOfContentArray?: boolean;
     parentIndex?: number;
     onChatChange?: (_mappedRequest: MappedLLMRequest) => void;
     showDeleteButton?: boolean;
     onDelete?: () => void;
+    showAnnotations?: boolean;
   } = {},
 ) => {
   switch (messageType) {
@@ -364,26 +377,13 @@ const renderContentByType = (
         onDelete: options.onDelete,
       });
     case "tool":
-      return mode === "raw" && chatMode !== "PLAYGROUND_INPUT" ? (
-        <MarkdownEditor
-          language="json"
-          setText={() => {}}
-          text={
-            typeof message === "string"
-              ? message
-              : JSON.stringify(message, null, 2)
-          }
-          disabled
-        />
-      ) : (
-        renderToolMessage(
-          displayContent,
-          message,
-          chatMode === "PLAYGROUND_INPUT",
-          mappedRequest,
-          messageIndex,
-          options.onChatChange,
-        )
+      return renderToolMessage(
+        displayContent,
+        message,
+        chatMode === "PLAYGROUND_INPUT",
+        mappedRequest,
+        messageIndex,
+        options.onChatChange,
       );
     case "text":
       return renderTextContent(
@@ -585,8 +585,8 @@ export default function ChatMessage({
                   name: undefined,
                   ...(prevRole === "assistant" && newRole !== "assistant"
                     ? {
-                        tool_calls: undefined,
-                      }
+                      tool_calls: undefined,
+                    }
                     : {}),
                 };
               }
@@ -801,27 +801,27 @@ export default function ChatMessage({
       {(chatMode !== "PLAYGROUND_OUTPUT" ||
         (chatMode === "PLAYGROUND_OUTPUT" &&
           message._type === "contentArray")) && (
-        <ChatMessageTopBar
-          popoverOpen={popoverOpen}
-          setPopoverOpen={setPopoverOpen}
-          dragHandle={dragHandle}
-          chatMode={chatMode}
-          message={message}
-          changeMessageRole={changeMessageRole}
-          messageIndex={messageIndex}
-          attributes={attributes}
-          listeners={listeners}
-          addToolCall={addToolCall}
-          deleteMessage={deleteMessage}
-          onAddText={addTextToMessage}
-          onAddImage={addImageToMessage}
-          onCopyContent={() => navigator.clipboard.writeText(content)}
-        />
-      )}
+          <ChatMessageTopBar
+            popoverOpen={popoverOpen}
+            setPopoverOpen={setPopoverOpen}
+            dragHandle={dragHandle}
+            chatMode={chatMode}
+            message={message}
+            changeMessageRole={changeMessageRole}
+            messageIndex={messageIndex}
+            attributes={attributes}
+            listeners={listeners}
+            addToolCall={addToolCall}
+            deleteMessage={deleteMessage}
+            onAddText={addTextToMessage}
+            onAddImage={addImageToMessage}
+            onCopyContent={() => navigator.clipboard.writeText(content)}
+          />
+        )}
       <div
         className={cn(
           "relative flex w-full flex-col",
-          chatMode !== "PLAYGROUND_INPUT" && "px-4 pb-4 pt-0",
+          chatMode !== "PLAYGROUND_INPUT" && "px-4 pb-4 pt-2",
           chatMode === "PLAYGROUND_OUTPUT" && "pt-4",
         )}
         onMouseEnter={() => setIsHovering(true)}
@@ -831,8 +831,9 @@ export default function ChatMessage({
           <div className="flex flex-col gap-4">
             {message.contentArray?.map((content, index) => {
               const contentType = getMessageType(content);
+              // Images have data in image_url, not content
               const shouldShowContent =
-                chatMode === "PLAYGROUND_INPUT" || content.content;
+                chatMode === "PLAYGROUND_INPUT" || content.content || content.image_url || (content._type === "image");
 
               return shouldShowContent ? (
                 <div key={index}>
@@ -873,6 +874,7 @@ export default function ChatMessage({
               onChatChange,
               showDeleteButton: false,
               onDelete: () => deleteMessage(messageIndex),
+              showAnnotations: !(isLongMessage && !isExpanded),
             },
           )
         )}
@@ -885,15 +887,13 @@ export default function ChatMessage({
             className="flex items-center gap-1.5 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
             <LuChevronDown
-              className={`h-4 w-4 transition-transform duration-200 ${
-                isExpanded ? "rotate-180" : ""
-              }`}
+              className={`h-4 w-4 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""
+                }`}
             />
             {isExpanded
               ? "Show less"
-              : `Show ${
-                  content.length - MESSAGE_LENGTH_THRESHOLD
-                } more characters`}
+              : `Show ${content.length - MESSAGE_LENGTH_THRESHOLD
+              } more characters`}
           </Button>
         )}
       </div>

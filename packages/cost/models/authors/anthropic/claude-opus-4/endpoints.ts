@@ -1,4 +1,4 @@
-import { ProviderName } from "../../../providers";
+import { ModelProviderName } from "../../../providers";
 import type { ModelProviderConfig } from "../../../types";
 import { ClaudeOpus4ModelName } from "./model";
 
@@ -6,17 +6,21 @@ export const endpoints = {
   "claude-opus-4:anthropic": {
     providerModelId: "claude-opus-4-20250514",
     provider: "anthropic",
+    author: "anthropic",
     version: "20250514",
-    pricing: {
-      prompt: 0.000015,
-      completion: 0.000075,
-      cacheRead: 0.0000015,
-      cacheWrite: {
-        "5m": 0.00001875,
-        "1h": 0.00003,
-        default: 0.00001875,
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000015,
+        output: 0.000075,
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+          write1h: 2.0,
+        },
       },
-    },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 32000,
     supportedParameters: [
@@ -28,7 +32,9 @@ export const endpoints = {
       "tools",
       "tool_choice",
     ],
+    supportedPlugins: ["web"],
     ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
     endpointConfigs: {
       "*": {},
     },
@@ -37,13 +43,22 @@ export const endpoints = {
   "claude-opus-4:vertex": {
     providerModelId: "claude-opus-4@20250514",
     provider: "vertex",
+    author: "anthropic",
     version: "vertex-2023-10-16",
-    pricing: {
-      prompt: 0.000015,
-      completion: 0.000075,
-      cacheRead: 0.0000015,
-      cacheWrite: 0.00001875,
-    },
+    ptbEnabled: true,
+    crossRegion: true,
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000015,
+        output: 0.000075,
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+        },
+      },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 32000,
     supportedParameters: [
@@ -55,7 +70,7 @@ export const endpoints = {
       "tools",
       "tool_choice",
     ],
-    ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
     endpointConfigs: {
       global: {
         providerModelId: "claude-opus-4@20250514",
@@ -64,15 +79,22 @@ export const endpoints = {
   },
   "claude-opus-4:bedrock": {
     provider: "bedrock",
+    author: "anthropic",
     providerModelId: "anthropic.claude-opus-4-20250514-v1:0",
     version: "20250514",
     crossRegion: true,
-    pricing: {
-      prompt: 0.000015,
-      completion: 0.000075,
-      cacheRead: 0.0000015,
-      cacheWrite: 0.00001875,
-    },
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000015,
+        output: 0.000075,
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+        },
+      },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 32000,
     supportedParameters: [
@@ -87,10 +109,73 @@ export const endpoints = {
       "top_k",
     ],
     ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
     endpointConfigs: {
       "us-east-1": {},
     },
   },
+  "claude-opus-4:openrouter": {
+    provider: "openrouter",
+    author: "anthropic",
+    providerModelId: "anthropic/claude-opus-4",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.00001583, // $15.83/1M - worst-case: $15.00/1M (Anthropic/Google) * 1.055
+        output: 0.00007913, // $79.13/1M - worst-case: $75.00/1M (Anthropic/Google) * 1.055
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+      },
+    ],
+    contextLength: 200000,
+    maxCompletionTokens: 32000,
+    supportedParameters: [
+      "max_tokens",
+      "temperature",
+      "stop",
+      "tools",
+      "tool_choice",
+      "top_p",
+      "top_k",
+    ],
+    ptbEnabled: true,
+    endpointConfigs: {
+      "*": {},
+    },
+  },
+  "claude-opus-4:helicone": {
+    provider: "helicone",
+    author: "anthropic",
+    providerModelId: "pa/cd-op-4-20250514",
+    version: "20250514",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000015,
+        output: 0.000075,
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+          write1h: 2.0,
+        },
+      },
+    ],
+    contextLength: 200000,
+    maxCompletionTokens: 32000,
+    supportedParameters: [
+      "max_tokens",
+      "temperature",
+      "stop",
+      "reasoning",
+      "include_reasoning",
+      "tools",
+      "tool_choice",
+    ],
+    ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
+    endpointConfigs: {
+      "*": {},
+    },
+  },
 } satisfies Partial<
-  Record<`${ClaudeOpus4ModelName}:${ProviderName}`, ModelProviderConfig>
+  Record<`${ClaudeOpus4ModelName}:${ModelProviderName}`, ModelProviderConfig>
 >;

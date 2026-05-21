@@ -321,6 +321,31 @@ export const modelMapping: CreatorModelMapping = {
         },
       ],
     },
+    "Claude Sonnet 4.6": {
+      defaultTokenCost: {
+        input: 0,
+        output: 0,
+      },
+      defaultParameters: {
+        max_tokens: 8192,
+        stop: [],
+        response_format: false,
+      },
+      providers: [
+        {
+          provider: "ANTHROPIC",
+          modelString: "claude-sonnet-4-6",
+        },
+        {
+          provider: "ANTHROPIC",
+          modelString: "claude-sonnet-4-6-20260217",
+        },
+        {
+          provider: "BEDROCK",
+          modelString: "anthropic.claude-sonnet-4-6-20260217-v1:0",
+        },
+      ],
+    },
   },
   Google: {
     "Gemini 2.0 Flash": {
@@ -454,6 +479,30 @@ export const modelMapping: CreatorModelMapping = {
         {
           provider: "OPENROUTER",
           modelString: "google/gemini-pro-1.5",
+        },
+      ],
+    },
+    "Gemini 3.1 Pro Preview": {
+      defaultTokenCost: {
+        input: 0,
+        output: 0,
+      },
+      defaultParameters: {
+        stop: [],
+        response_format: true,
+      },
+      providers: [
+        {
+          provider: "GOOGLE_GEMINI",
+          modelString: "gemini-3.1-pro-preview",
+        },
+        {
+          provider: "GOOGLE_VERTEXAI",
+          modelString: "gemini-3.1-pro-preview",
+        },
+        {
+          provider: "OPENROUTER",
+          modelString: "google/gemini-3.1-pro-preview",
         },
       ],
     },

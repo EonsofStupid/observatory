@@ -2,7 +2,7 @@
 import { SupabaseClient } from "@supabase/supabase-js";
 import { Provider } from "../..";
 import { Database, Json } from "../../../supabase/database.types";
-import { getTokenCount } from "../clients/TokenCounterClient";
+
 import { ClickhouseClientWrapper } from "../db/ClickhouseWrapper";
 import { DBWrapper } from "../db/DBWrapper";
 import { RequestResponseStore } from "../db/RequestResponseStore";
@@ -27,10 +27,17 @@ import { parseOpenAIStream } from "./streamParsers/openAIStreamParser";
 import { parseVercelStream } from "./streamParsers/vercelStreamParser";
 
 import { TemplateWithInputs } from "@helicone/prompts/dist/objectParser";
-import { costOfPrompt } from "@helicone-package/cost";
+import { normalizeAIGatewayResponse } from "@helicone-package/llm-mapper/transform/providers/normalizeResponse";
 import { HeliconeProducer } from "../clients/producers/HeliconeProducer";
 import { MessageData } from "../clients/producers/types";
 import { DEFAULT_UUID } from "@helicone-package/llm-mapper/types";
+import { Attempt, EscrowInfo } from "../ai-gateway/types";
+import {
+  IRequestBodyBuffer,
+  ValidRequestBody,
+} from "../../RequestBodyBuffer/IRequestBodyBuffer";
+import { ModelProviderName } from "@helicone-package/cost/models/providers";
+import { BodyMappingType } from "@helicone-package/cost/models/types";
 
 export interface DBLoggableProps {
   response: {
@@ -51,7 +58,9 @@ export interface DBLoggableProps {
     promptSettings: PromptSettings;
     prompt2025Settings: Prompt2025Settings;
     startTime: Date;
-    bodyText?: string;
+    body: ValidRequestBody;
+    requestBodyBuffer: IRequestBodyBuffer;
+    unsafeGetBodyText?: () => Promise<string | null>;
     path: string;
     targetUrl: string;
     properties: Record<string, string>;
@@ -66,6 +75,10 @@ export interface DBLoggableProps {
     request_ip: string | null;
     country_code: string | null;
     requestReferrer: string | null;
+    // set for AI Gateway PTB requests
+    escrowInfo?: EscrowInfo;
+    // set for all AI Gateway requests (PTB+BYOK)
+    attempt?: Attempt;
   };
   timing: {
     startTime: Date;
@@ -83,6 +96,33 @@ export interface AuthParams {
   accessDict: {
     cache: boolean;
   };
+  metaData: {
+    allowNegativeBalance: boolean;
+    creditLimit: number;
+  };
+}
+
+export interface ParsedResponseData {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  response: {
+    id: string;
+    created_at: string;
+    request: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    body: any;
+    status: number;
+    completion_tokens?: number;
+    prompt_tokens?: number;
+    time_to_first_token?: number | null;
+    model?: string;
+    delay_ms?: number;
+    prompt_cache_write_tokens?: number;
+    prompt_cache_read_tokens?: number;
+    prompt_audio_tokens?: number;
+    completion_audio_tokens?: number;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  body: any;
 }
 
 export function dbLoggableRequestFromProxyRequest(
@@ -97,7 +137,9 @@ export function dbLoggableRequestFromProxyRequest(
     heliconeTemplate: proxyRequest.heliconePromptTemplate ?? undefined,
     userId: proxyRequest.userId,
     startTime: requestStartTime,
-    bodyText: proxyRequest.bodyText ?? undefined,
+    unsafeGetBodyText: proxyRequest.unsafeGetBodyText,
+    body: proxyRequest.body,
+    requestBodyBuffer: proxyRequest.requestWrapper.requestBodyBuffer,
     path: proxyRequest.requestWrapper.url.href,
     targetUrl: proxyRequest.targetUrl.href,
     properties: proxyRequest.requestWrapper.heliconeHeaders.heliconeProperties,
@@ -112,6 +154,8 @@ export function dbLoggableRequestFromProxyRequest(
     request_ip: null,
     country_code: (proxyRequest.requestWrapper.cf?.country as string) ?? null,
     requestReferrer: proxyRequest.requestWrapper.requestReferrer ?? null,
+    escrowInfo: proxyRequest.escrowInfo ?? undefined,
+    attempt: proxyRequest.requestWrapper.getGatewayAttempt() ?? undefined,
   };
 }
 
@@ -169,6 +213,7 @@ export async function dbLoggableRequestFromAsyncLogModel(
             promptMode: "deactivated",
           },
       prompt2025Settings: requestWrapper.prompt2025Settings,
+      requestBodyBuffer: requestWrapper.requestBodyBuffer,
       userId: providerRequestHeaders.userId ?? undefined,
       startTime: asyncLogModel.timing
         ? new Date(
@@ -176,7 +221,10 @@ export async function dbLoggableRequestFromAsyncLogModel(
               asyncLogModel.timing.startTime.milliseconds
           )
         : new Date(),
-      bodyText: JSON.stringify(asyncLogModel.providerRequest.json),
+      body: JSON.stringify(asyncLogModel.providerRequest.json),
+
+      unsafeGetBodyText: async () =>
+        JSON.stringify(asyncLogModel.providerRequest.json),
       path: asyncLogModel.providerRequest.url,
       targetUrl: asyncLogModel.providerRequest.url,
       properties: providerRequestHeaders.heliconeProperties,
@@ -257,20 +305,15 @@ export class DBLoggable {
     return this.timing.startTime.getTime();
   }
 
-  async tokenCounter(text: string): Promise<number> {
-    return getTokenCount(text, this.provider, this.tokenCalcUrl);
-  }
-
   async parseResponse(
     responseBody: string,
     status: number
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<Result<any, string>> {
     let result = responseBody;
-    const isStream = this.request.isStream;
+    const isStream = await this.request.requestBodyBuffer.isStream();
+    const model = await this.request.requestBodyBuffer.model();
     const responseStatus = await this.response.status();
-    const requestBody = this.request.bodyText;
-    const tokenCounter = (t: string) => this.tokenCounter(t);
     if (isStream && status === INTERNAL_ERRORS["Cancelled"]) {
       // Remove last line of stream from result
       result = result.split("\n").slice(0, -1).join("\n");
@@ -282,9 +325,9 @@ export class DBLoggable {
     try {
       if (HTTPSErrorRange || HTTPSRedirect) {
         return ok(JSON.parse(result));
-      } else if (!isStream && this.provider === "ANTHROPIC" && requestBody) {
+      } else if (!isStream && this.provider === "ANTHROPIC") {
         const responseJson = JSON.parse(result);
-        if (getModel(requestBody ?? "{}").includes("claude-3")) {
+        if (model?.includes("claude-3")) {
           if (
             !responseJson?.usage?.output_tokens ||
             !responseJson?.usage?.input_tokens
@@ -304,16 +347,12 @@ export class DBLoggable {
             });
           }
         } else {
-          const prompt = JSON.parse(requestBody)?.prompt ?? "";
-          const completion = responseJson?.completion ?? "";
-          const completionTokens = await tokenCounter(completion);
-          const promptTokens = await tokenCounter(prompt);
           return ok({
             ...responseJson,
             usage: {
-              total_tokens: promptTokens + completionTokens,
-              prompt_tokens: promptTokens,
-              completion_tokens: completionTokens,
+              total_tokens: -1,
+              prompt_tokens: -1,
+              completion_tokens: -1,
               helicone_calculated: true,
             },
           });
@@ -340,9 +379,9 @@ export class DBLoggable {
           },
         });
       } else if (isStream && this.provider === "ANTHROPIC") {
-        return anthropicAIStream(result, tokenCounter, requestBody);
+        return anthropicAIStream(result);
       } else if (isStream) {
-        return parseOpenAIStream(result, tokenCounter, requestBody);
+        return parseOpenAIStream(result);
       } else if (
         this.provider === "VERCEL" &&
         result.includes("data: {") &&
@@ -377,54 +416,187 @@ export class DBLoggable {
     prompt_tokens: number | undefined;
     completion_tokens: number | undefined;
   } {
-    if (
-      typeof parsedResponse !== "object" ||
-      parsedResponse === null ||
-      !("usage" in parsedResponse)
-    ) {
+    if (typeof parsedResponse !== "object" || parsedResponse === null) {
       return {
         prompt_tokens: undefined,
         completion_tokens: undefined,
       };
     }
 
-    const response = parsedResponse as {
-      usage: {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        input_tokens?: number;
-        output_tokens?: number;
-        inputTokens?: number;
-        outputTokens?: number;
+    // Handle OpenAI format (usage field)
+    if ("usage" in parsedResponse) {
+      const response = parsedResponse as {
+        usage: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          input_tokens?: number;
+          output_tokens?: number;
+          inputTokens?: number;
+          outputTokens?: number;
+        };
       };
-    };
-    const usage = response.usage;
+      const usage = response.usage;
+
+      return {
+        prompt_tokens:
+          usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.inputTokens,
+        completion_tokens:
+          usage?.completion_tokens ?? usage?.output_tokens ?? usage?.outputTokens,
+      };
+    }
+
+    // Handle Gemini format (usageMetadata field)
+    if ("usageMetadata" in parsedResponse) {
+      const response = parsedResponse as {
+        usageMetadata: {
+          promptTokenCount?: number;
+          candidatesTokenCount?: number;
+          totalTokenCount?: number;
+        };
+      };
+      const usageMetadata = response.usageMetadata;
+
+      return {
+        prompt_tokens: usageMetadata?.promptTokenCount,
+        completion_tokens: usageMetadata?.candidatesTokenCount,
+      };
+    }
 
     return {
-      prompt_tokens:
-        usage?.prompt_tokens ?? usage?.input_tokens ?? usage?.inputTokens,
-      completion_tokens:
-        usage?.completion_tokens ?? usage?.output_tokens ?? usage?.outputTokens,
+      prompt_tokens: undefined,
+      completion_tokens: undefined,
     };
+  }
+
+  // Extract detailed usage including cache tokens, audio tokens, reasoning tokens
+  getDetailedUsage(parsedResponse: unknown): {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_cache_read_tokens?: number;
+    prompt_cache_write_tokens?: number;
+    prompt_audio_tokens?: number;
+    completion_audio_tokens?: number;
+    reasoning_tokens?: number;
+  } {
+    if (typeof parsedResponse !== "object" || parsedResponse === null) {
+      return {};
+    }
+
+    // Handle OpenAI format (usage field with details)
+    if ("usage" in parsedResponse) {
+      const response = parsedResponse as {
+        usage: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          input_tokens?: number;
+          output_tokens?: number;
+          // OpenAI detailed usage
+          prompt_tokens_details?: {
+            cached_tokens?: number;
+            audio_tokens?: number;
+          };
+          completion_tokens_details?: {
+            reasoning_tokens?: number;
+            audio_tokens?: number;
+          };
+          // Anthropic cache usage
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
+      };
+      const usage = response.usage;
+
+      return {
+        prompt_tokens:
+          usage?.prompt_tokens ?? usage?.input_tokens,
+        completion_tokens:
+          usage?.completion_tokens ?? usage?.output_tokens,
+        prompt_cache_read_tokens:
+          usage?.prompt_tokens_details?.cached_tokens ??
+          usage?.cache_read_input_tokens,
+        prompt_cache_write_tokens:
+          usage?.cache_creation_input_tokens,
+        prompt_audio_tokens:
+          usage?.prompt_tokens_details?.audio_tokens,
+        completion_audio_tokens:
+          usage?.completion_tokens_details?.audio_tokens,
+        reasoning_tokens:
+          usage?.completion_tokens_details?.reasoning_tokens,
+      };
+    }
+
+    // Handle Gemini format (usageMetadata field)
+    if ("usageMetadata" in parsedResponse) {
+      const response = parsedResponse as {
+        usageMetadata: {
+          promptTokenCount?: number;
+          candidatesTokenCount?: number;
+          cachedContentTokenCount?: number;
+        };
+      };
+      const usageMetadata = response.usageMetadata;
+
+      return {
+        prompt_tokens: usageMetadata?.promptTokenCount,
+        completion_tokens: usageMetadata?.candidatesTokenCount,
+        prompt_cache_read_tokens: usageMetadata?.cachedContentTokenCount,
+      };
+    }
+
+    return {};
   }
 
   async getStatus() {
     return await this.response.status();
   }
 
-  async getResponse() {
+  // TODO: Refactor, see ProxyForwarder
+  async getRawResponse() {
     const { body: responseBody, endTime: responseEndTime } =
       await this.response.getResponseBody();
-    const endTime = this.timing.endTime ?? responseEndTime;
+    return responseBody.join("");
+  }
+
+  async readRawResponse(): Promise<Result<string, string>> {
+    try {
+      const rawResponse = await withTimeout(
+        this.getRawResponse(),
+        1000 * 60 * 15
+      ); // 15 minutes
+
+      return ok(rawResponse);
+    } catch (e) {
+      return err("error getting raw response, " + e);
+    }
+  }
+
+  async parseRawResponse(
+    rawResponse: string
+  ): Promise<Result<{ response: ParsedResponseData["response"] }, string>> {
+    try {
+      const parsedData = await withTimeout(
+        this.parseRawResponseInternal(rawResponse),
+        1000 * 60 * 30
+      ); // 30 minutes
+
+      return ok({
+        response: parsedData.response,
+      });
+    } catch (e) {
+      return err("error parsing raw response, " + e);
+    }
+  }
+
+  private async parseRawResponseInternal(
+    rawResponse: string
+  ): Promise<ParsedResponseData> {
+    const endTime = this.timing.endTime ?? new Date();
     const delay_ms = endTime.getTime() - this.timing.startTime.getTime();
     const timeToFirstToken = this.request.isStream
       ? await this.timing.timeToFirstToken()
       : null;
     const status = await this.response.status();
-    const parsedResponse = await this.parseResponse(
-      responseBody.join(""),
-      status
-    );
+    const parsedResponse = await this.parseResponse(rawResponse, status);
     const isStream = this.request.isStream;
 
     const usage = this.getUsage(parsedResponse.data);
@@ -434,7 +606,7 @@ export class DBLoggable {
       this.provider === "GOOGLE" &&
       parsedResponse.error === null
     ) {
-      const body = this.tryJsonParse(responseBody.join(""));
+      const body = this.tryJsonParse(rawResponse);
       const model = body?.model ?? body?.body?.model ?? undefined;
 
       return {
@@ -526,28 +698,6 @@ export class DBLoggable {
         };
   }
 
-  async readResponse(): Promise<
-    Result<
-      {
-        response: Database["public"]["Tables"]["response"]["Insert"];
-      },
-      string
-    >
-  > {
-    try {
-      const { response } = await withTimeout(
-        this.getResponse(),
-        1000 * 60 * 30
-      ); // 30 minutes
-
-      return ok({
-        response,
-      });
-    } catch (e) {
-      return err("error getting response, " + e);
-    }
-  }
-
   isSuccessResponse = (status: number | undefined | null): boolean =>
     status != null && status >= 200 && status <= 299;
 
@@ -556,7 +706,6 @@ export class DBLoggable {
       supabase: SupabaseClient<Database>; // TODO : Deprecate
       dbWrapper: DBWrapper;
       clickhouse: ClickhouseClientWrapper;
-      queue: RequestResponseStore;
       requestResponseManager: RequestResponseManager;
       producer: HeliconeProducer;
     },
@@ -564,14 +713,7 @@ export class DBLoggable {
     requestHeaders?: HeliconeHeaders,
     cachedHeaders?: Headers,
     cacheSettings?: CacheSettings
-  ): Promise<
-    Result<
-      {
-        cost: number;
-      } | null,
-      string
-    >
-  > {
+  ): Promise<Result<void, string>> {
     try {
       const { data: authParams, error } = await db.dbWrapper.getAuthParams();
       if (error || !authParams?.organizationId) {
@@ -589,16 +731,13 @@ export class DBLoggable {
 
         const rateLimiter = await db.dbWrapper.getRateLimiter();
         if (rateLimiter.error !== null) {
-          return rateLimiter;
+          throw new Error(rateLimiter.error);
         }
-
         // TODO: Add an early exit if we really want to rate limit in the future
         const rateLimit = await rateLimiter.data.checkRateLimit(tier);
-
         if (rateLimit.data?.isRateLimited) {
           orgRateLimit = true;
         }
-
         if (rateLimit.error) {
           console.error(`Error checking rate limit: ${rateLimit.error}`);
         }
@@ -615,30 +754,7 @@ export class DBLoggable {
         cachedHeaders,
         cacheSettings
       );
-
-      // THIS IS ONLY USED FOR COST CALCULATION ON RATELIMITING
-      const readResponse = await this.readResponse();
-
-      const model =
-        this.request.modelOverride ??
-        readResponse.data?.response.model ??
-        "not-found";
-
-      const cost =
-        this.modelCost({
-          model: model,
-          sum_completion_tokens:
-            readResponse.data?.response?.completion_tokens ?? 0,
-          sum_prompt_tokens: readResponse.data?.response?.prompt_tokens ?? 0,
-          sum_tokens:
-            (readResponse.data?.response.completion_tokens ?? 0) +
-            (readResponse.data?.response.prompt_tokens ?? 0),
-          provider: this.request.provider ?? "",
-        }) ?? 0;
-
-      return ok({
-        cost: cost,
-      });
+      return ok(undefined);
     } catch (error) {
       return err("Error logging");
     }
@@ -649,7 +765,6 @@ export class DBLoggable {
       supabase: SupabaseClient<Database>; // TODO : Deprecate
       dbWrapper: DBWrapper;
       clickhouse: ClickhouseClientWrapper;
-      queue: RequestResponseStore;
       requestResponseManager: RequestResponseManager;
       producer: HeliconeProducer;
     },
@@ -676,21 +791,115 @@ export class DBLoggable {
       return err(org.error);
     }
 
+    // Check if free tier limit is exceeded for the current month
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    const freeLimitExceeded =
+      org.data.tier === "free" && org.data.freeLimitExceeded === currentMonth;
+    const isPassthroughBilling = this.request.escrowInfo ? true : false;
+
+    // Note: We always log metadata to Kafka/ClickHouse even when free limit exceeded
+    // This allows tracking request volume for exceeded orgs
+    // We just skip S3 body storage for non-PTB exceeded requests
+
     const { body: rawResponseBody, endTime: responseEndTime } =
       await this.response.getResponseBody();
 
-    if (S3_ENABLED === "true") {
-      const s3Result = await db.requestResponseManager.storeRequestResponseRaw({
-        organizationId: authParams.organizationId,
-        requestId: this.request.requestId,
-        requestBody: this.request.bodyText ?? "{}",
-        responseBody: rawResponseBody.join(""),
-      });
+    // Extract usage and model from response body (needed for cases where body isn't stored)
+    let extractedUsage: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      prompt_cache_read_tokens?: number;
+      prompt_cache_write_tokens?: number;
+      prompt_audio_tokens?: number;
+      completion_audio_tokens?: number;
+      reasoning_tokens?: number;
+    } = {};
+    let extractedModel: string | undefined;
+    let failedToGetUsage = true;
+    try {
+      const responseText = rawResponseBody.join("");
+      const parsedResponse = JSON.parse(responseText);
+      extractedUsage = this.getDetailedUsage(parsedResponse);
+      // Check if we actually got usage tokens
+      failedToGetUsage = !extractedUsage.prompt_tokens && !extractedUsage.completion_tokens;
+      // Extract model from response (OpenAI format)
+      if (
+        typeof parsedResponse === "object" &&
+        parsedResponse !== null &&
+        "model" in parsedResponse
+      ) {
+        extractedModel = (parsedResponse as { model?: string }).model;
+      }
+    } catch {
+      // Parsing failed - Jawn will need to extract usage from the body
+      failedToGetUsage = true;
+    }
 
-      if (s3Result.error) {
-        console.error(
-          `Error storing request response in S3: ${s3Result.error}`
-        );
+    // Skip S3 storage if:
+    // 1. Free tier limit exceeded AND (not PTB OR we got usage successfully)
+    //    - Non-PTB: always skip bodies
+    //    - PTB with usage: skip bodies (we have what we need for billing)
+    //    - PTB without usage: store bodies (Jawn needs to extract for billing)
+    // 2. Both omit headers are set (but not if PTB failed to get usage)
+    const skipS3ForFreeTier =
+      freeLimitExceeded && (!isPassthroughBilling || !failedToGetUsage);
+    const skipS3ForOmitHeaders =
+      !(isPassthroughBilling && failedToGetUsage) &&
+      requestHeaders?.omitHeaders?.omitRequest === true &&
+      requestHeaders?.omitHeaders?.omitResponse === true;
+    const skipS3Storage = skipS3ForFreeTier || skipS3ForOmitHeaders;
+
+    if (S3_ENABLED === "true" && !skipS3Storage) {
+      try {
+        const providerResponse = rawResponseBody.join("");
+        let openAIResponse: string | undefined;
+
+        // Check if this is an AI Gateway request
+        const isAIGateway = this.request.attempt?.endpoint;
+
+        if (isAIGateway) {
+          const responseStatus = await this.response.status();
+          if (responseStatus < 400) {
+            try {
+              const bodyMapping = this.request.attempt?.endpoint.userConfig?.gatewayMapping;
+
+              // Normalize response and convert to user's requested format (OPENAI or RESPONSES)
+              openAIResponse = await normalizeAIGatewayResponse({
+                responseText: providerResponse,
+                isStream: this.request.isStream,
+                provider: this.request.attempt?.endpoint.provider ?? "openai",
+                providerModelId:
+                  this.request.attempt?.endpoint.providerModelId ?? "",
+                responseFormat:
+                  this.request.attempt?.endpoint.modelConfig.responseFormat ??
+                  "OPENAI",
+                bodyMapping: bodyMapping ?? "OPENAI",
+              });
+            } catch (e) {
+              console.error("Failed to normalize AI Gateway response:", e);
+              openAIResponse = providerResponse;
+            }
+          } else {
+            openAIResponse = providerResponse;
+          }
+        }
+
+        const s3Result =
+          await db.requestResponseManager.storeRequestResponseRaw({
+            organizationId: authParams.organizationId,
+            requestId: this.request.requestId,
+            requestBodyBuffer: this.request.requestBodyBuffer,
+            providerResponse,
+            openAIResponse,
+          });
+
+        if (s3Result.error) {
+          console.error(
+            `Error storing request response in S3: ${s3Result.error}`
+          );
+        }
+      } catch (e) {
+        console.error("Error preparing S3 payload:", e);
       }
     }
 
@@ -705,6 +914,19 @@ export class DBLoggable {
       cacheSettings?.shouldReadFromCache && cachedHeaders
         ? cachedHeaders.get("Helicone-Id")
         : DEFAULT_UUID;
+
+    let gatewayProvider: ModelProviderName | undefined;
+    let gatewayModel: string | undefined;
+    let aiGatewayBodyMapping: BodyMappingType | undefined;
+    if (this.request.attempt?.source && this.request.attempt?.endpoint) {
+      const sourceParts = this.request.attempt?.source.split("/");
+      const model = sourceParts[0];
+      const provider = sourceParts[1];
+
+      gatewayProvider = provider as ModelProviderName;
+      gatewayModel = model as string;
+      aiGatewayBodyMapping = this.request.attempt?.endpoint.userConfig?.gatewayMapping ?? "OPENAI";
+    }
 
     const kafkaMessage: MessageData = {
       id: this.request.requestId,
@@ -724,6 +946,15 @@ export class DBLoggable {
         promptVersionId: this.request.prompt2025Settings.promptVersionId,
         promptInputs: this.request.prompt2025Settings.promptInputs,
         promptEnvironment: this.request.prompt2025Settings.environment,
+        isPassthroughBilling: this.request.escrowInfo ? true : false,
+        gatewayProvider: gatewayProvider ?? undefined,
+        gatewayModel: gatewayModel ?? undefined,
+        providerModelId:
+          this.request.attempt?.endpoint.providerModelId ?? undefined,
+        stripeCustomerId: requestHeaders.stripeCustomerId ?? undefined,
+        aiGatewayBodyMapping: aiGatewayBodyMapping ?? undefined,
+        // Pass freeLimitExceeded to Jawn so it knows bodies may not be in S3
+        freeLimitExceeded: freeLimitExceeded ? true : undefined,
       },
       log: {
         request: {
@@ -745,7 +976,7 @@ export class DBLoggable {
           heliconeProxyKeyId: this.request.heliconeProxyKeyId ?? undefined,
           targetUrl: this.request.targetUrl,
           provider: this.request.provider,
-          bodySize: this.request.bodyText?.length ?? 0,
+          bodySize: await this.request.requestBodyBuffer.bodyLength(),
           path: this.request.path,
           threat: this.request.threat ?? undefined,
           countryCode: this.request.country_code ?? undefined,
@@ -779,6 +1010,14 @@ export class DBLoggable {
                   }
                 })(),
           cost: this.response.cost,
+          promptTokens: extractedUsage.prompt_tokens,
+          completionTokens: extractedUsage.completion_tokens,
+          promptCacheReadTokens: extractedUsage.prompt_cache_read_tokens,
+          promptCacheWriteTokens: extractedUsage.prompt_cache_write_tokens,
+          promptAudioTokens: extractedUsage.prompt_audio_tokens,
+          completionAudioTokens: extractedUsage.completion_audio_tokens,
+          reasoningTokens: extractedUsage.reasoning_tokens,
+          model: extractedModel,
         },
       },
     };
@@ -823,29 +1062,5 @@ export class DBLoggable {
     modelOverride: string | null
   ): string {
     return modelOverride ?? responseModel ?? requestModel ?? "not-found";
-  }
-
-  modelCost(modelRow: {
-    model: string;
-    provider: string;
-    sum_prompt_tokens: number;
-    sum_completion_tokens: number;
-    sum_tokens: number;
-  }): number {
-    const model = modelRow.model;
-    const promptTokens = modelRow.sum_prompt_tokens;
-    const completionTokens = modelRow.sum_completion_tokens;
-    return (
-      costOfPrompt({
-        model,
-        promptTokens,
-        completionTokens,
-        provider: modelRow.provider,
-        promptCacheWriteTokens: 0,
-        promptCacheReadTokens: 0,
-        promptAudioTokens: 0,
-        completionAudioTokens: 0,
-      }) ?? 0
-    );
   }
 }

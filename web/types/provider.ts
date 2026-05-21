@@ -1,5 +1,7 @@
+import { ModelProviderName } from "../../packages/cost/models/providers";
+
 export interface Provider {
-  id: string;
+  id: ModelProviderName;
   name: string;
   logoUrl: string;
   description: string;
@@ -8,6 +10,9 @@ export interface Provider {
   apiKeyPlaceholder: string;
   relevanceScore: number; // Hidden score for sorting by relevance
   note?: string;
+  multipleAllowed?: boolean;
+  auth?: "api-key" | "oauth" | "aws-signature" | "service_account";
+  publiclyVisible?: boolean;
 }
 
 // Interface for provider configuration from API
@@ -23,11 +28,13 @@ export interface ProviderConfiguration {
 // Interface for provider keys
 export interface ProviderKey {
   id: string;
-  provider_name: string;
+  provider_name: ModelProviderName;
   provider_key_name: string;
   created_at?: string;
   soft_delete: boolean;
   config?: Record<string, any>; // JSON config field for provider-specific settings
+  cuid?: string | null; // CUID for the provider key
+  byok_enabled?: boolean; // Indicates if key is enabled for AI Gateway (BYOK)
 }
 
 // Interface for decrypted provider key

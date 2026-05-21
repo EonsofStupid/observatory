@@ -44,21 +44,29 @@ export class S3Client {
   private awsClient: AwsS3Client;
 
   constructor(
-    accessKey: string,
-    secretKey: string,
+    accessKey: string | undefined,
+    secretKey: string | undefined,
     private endpoint: string,
     private bucketName: string,
     private region: string
   ) {
-    this.awsClient = new AwsS3Client({
-      credentials: {
-        accessKeyId: accessKey,
-        secretAccessKey: secretKey,
-      },
+    const config: any = {
       region: this.region,
       endpoint: endpoint ? endpoint : undefined,
       forcePathStyle: true,
-    });
+    };
+
+    // Only add credentials if both accessKey and secretKey are provided
+    if (accessKey && secretKey) {
+      config.credentials = {
+        accessKeyId: accessKey,
+        secretAccessKey: secretKey,
+      };
+    }
+    // If credentials are not provided, AWS SDK will use default credential chain
+    // (environment variables, IAM roles, etc.)
+
+    this.awsClient = new AwsS3Client(config);
   }
 
   async copyObject(
@@ -351,6 +359,46 @@ export class S3Client {
 
   getPromptKey = (promptId: string, promptVersionId: string, orgId: string) => {
     return `organizations/${orgId}/prompts/${promptId}/versions/${promptVersionId}/prompt_body`;
+  }
+
+  async getPromptBody(
+    promptId: string,
+    promptVersionId: string,
+    orgId: string
+  ): Promise<Result<unknown, string>> {
+    try {
+      const key = this.getPromptKey(promptId, promptVersionId, orgId);
+      const signedUrl = await this.getSignedUrl(key);
+      if (signedUrl.error || !signedUrl.data) {
+        return err(signedUrl.error || "Failed to get signed URL");
+      }
+
+      const contentResponse = await retry(
+        async () => {
+          return getLimiter.schedule(() => fetch(signedUrl.data!));
+        },
+        {
+          retries: 3,
+          factor: 2,
+          minTimeout: 350,
+          maxTimeout: 1050,
+        }
+      );
+
+      if (!contentResponse.ok) {
+        if (contentResponse.status === 404) {
+          return err("Prompt body not found in S3");
+        }
+        return err(`Error fetching prompt body from S3: ${contentResponse.statusText}`);
+      }
+
+      const text = await contentResponse.text();
+      const promptBody = JSON.parse(text);
+      return ok(promptBody);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return err(`Error fetching prompt body: ${errorMessage}`);
+    }
   }
 
   getRequestResponseImageKey = (

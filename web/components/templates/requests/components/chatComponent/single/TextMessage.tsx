@@ -1,19 +1,17 @@
-import { MappedLLMRequest } from "@helicone-package/llm-mapper/types";
+import { stripDangerousHtml } from "@/lib/sanitizeContent";
+import { MappedLLMRequest, Message } from "@helicone-package/llm-mapper/types";
 import { isJson } from "../ChatMessage";
 import { JsonRenderer } from "./JsonRenderer";
 import { ChatMode } from "../../Chat";
 import MarkdownEditor from "@/components/shared/markdownEditor";
 import { Mode } from "@/store/requestRenderModeStore";
-import dynamic from "next/dynamic";
-import { markdownComponents } from "@/components/shared/prompts/ResponsePanel";
-import { BrainIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
+import CitationAnnotations from "./CitationAnnotations";
+import { Streamdown } from "streamdown";
+import type { BundledTheme } from "shiki";
+import { preserveLineBreaksForMarkdown } from "@/lib/textHelpers";
 
-// Dynamically import ReactMarkdown with no SSR
-const ReactMarkdown = dynamic(() => import("react-markdown"), {
-  ssr: false,
-  loading: () => <div className="h-4 w-full animate-pulse rounded bg-muted" />,
-});
+const shikiTheme: [BundledTheme, BundledTheme] = ["vitesse-light", "vitesse-dark"];
 
 interface TextMessageProps {
   isPartOfContentArray?: boolean;
@@ -25,6 +23,8 @@ interface TextMessageProps {
   messageIndex?: number;
   onChatChange?: (_mappedRequest: MappedLLMRequest) => void;
   mode: Mode;
+  annotations?: Message["annotations"];
+  showAnnotations?: boolean;
 }
 export default function TextMessage({
   isPartOfContentArray,
@@ -36,6 +36,8 @@ export default function TextMessage({
   messageIndex,
   onChatChange,
   mode,
+  annotations,
+  showAnnotations,
 }: TextMessageProps) {
   if (isJson(displayContent) && chatMode !== "PLAYGROUND_INPUT") {
     return (
@@ -110,42 +112,35 @@ export default function TextMessage({
       }
       text={
         typeof displayContent === "string"
-          ? displayContent
+          ? displayReasoning && !displayContent
+            ? displayReasoning
+            : displayContent
           : JSON.stringify(displayContent)
       }
       disabled={chatMode !== "PLAYGROUND_INPUT"}
     />
   ) : (
     <>
-      {displayReasoning && !displayContent && (
-        <div className="border-l-2 border-l-muted-foreground bg-muted py-2 pl-2 text-sm text-slate-400 dark:text-slate-700">
-          <div className="flex animate-pulse items-center gap-2">
-            <BrainIcon className="h-4 w-4" />
-            <span className="font-medium">Thinking...</span>
-          </div>
-          <ReactMarkdown
-            components={markdownComponents}
-            className="w-full whitespace-pre-wrap break-words text-sm"
-          >
-            {displayReasoning}
-          </ReactMarkdown>
-        </div>
-      )}
       {displayContent ? (
-        <ReactMarkdown
-          components={markdownComponents}
-          className="w-full whitespace-pre-wrap break-words text-sm"
-        >
-          {displayContent}
-        </ReactMarkdown>
-      ) : !displayReasoning ? (
+        <>
+          <div className="w-full whitespace-pre-wrap break-words text-sm">
+            <Streamdown shikiTheme={shikiTheme}>
+              {preserveLineBreaksForMarkdown(stripDangerousHtml(displayContent))}
+            </Streamdown>
+          </div>
+          {annotations && annotations.length > 0 && (
+            <CitationAnnotations
+              annotations={annotations}
+              showAnnotations={showAnnotations}
+            />
+          )}
+        </>
+      ) : (
         <div className="flex flex-col gap-2">
           <Skeleton className="h-4 w-full animate-pulse" />
           <Skeleton className="h-4 w-full animate-pulse" />
           <Skeleton className="h-4 w-2/3 animate-pulse" />
         </div>
-      ) : (
-        <></>
       )}
     </>
   );

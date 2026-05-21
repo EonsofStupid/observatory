@@ -65,9 +65,11 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.000015,
-      prompt_cache_write_token: 0.000015 * 1.25,
-      prompt_cache_read_token: 0.000015 * 0.1,
+      prompt_cache_write_token: 0.00001875, // 5m cache write: $18.75 / MTok
+      prompt_cache_read_token: 0.0000015, // Cache hits/refreshes: $1.5 / MTok
       completion_token: 0.000075,
+      prompt_cache_creation_5m: 0.00001875, // $18.75 / MTok
+      prompt_cache_creation_1h: 0.00003, // $30 / MTok
     },
     showInPlayground: true,
   },
@@ -78,8 +80,6 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.000003,
-      prompt_cache_write_token: 0.000003 * 1.25,
-      prompt_cache_read_token: 0.000003 * 0.1,
       completion_token: 0.000015,
     },
     showInPlayground: true,
@@ -91,9 +91,11 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.000003,
-      prompt_cache_write_token: 0.000003 * 1.25,
-      prompt_cache_read_token: 0.000003 * 0.1,
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
       completion_token: 0.000015,
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
     },
     showInPlayground: true,
   },
@@ -104,9 +106,11 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.000003,
-      prompt_cache_write_token: 0.000003 * 1.25,
-      prompt_cache_read_token: 0.000003 * 0.1,
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
       completion_token: 0.000015,
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
     },
     showInPlayground: true,
   },
@@ -117,9 +121,11 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.000003,
-      prompt_cache_write_token: 0.000003 * 1.25,
-      prompt_cache_read_token: 0.000003 * 0.1,
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
       completion_token: 0.000015,
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
     },
     showInPlayground: true,
   },
@@ -130,9 +136,11 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.00000025,
-      prompt_cache_write_token: 0.00000025 * 1.25,
-      prompt_cache_read_token: 0.00000025 * 0.1,
+      prompt_cache_write_token: 0.0000003125, // 5m cache write: $0.30 / MTok (25% increase from $0.25)
+      prompt_cache_read_token: 0.000000025, // Cache hits/refreshes: $0.025 / MTok (10% of base)
       completion_token: 0.00000125,
+      prompt_cache_creation_5m: 0.0000003125, // $0.30 / MTok (rounded from $0.3125)
+      prompt_cache_creation_1h: 0.0000005, // $0.50 / MTok
     },
     showInPlayground: true,
   },
@@ -143,9 +151,26 @@ export const costs: ModelRow[] = [
     },
     cost: {
       prompt_token: 0.0000008,
-      prompt_cache_write_token: 0.0000008 * 1.25,
-      prompt_cache_read_token: 0.0000008 * 0.1,
+      prompt_cache_write_token: 0.000001, // 5m cache write: $1 / MTok
+      prompt_cache_read_token: 0.00000008, // Cache hits/refreshes: $0.08 / MTok
       completion_token: 0.000004,
+      prompt_cache_creation_5m: 0.000001, // $1 / MTok
+      prompt_cache_creation_1h: 0.0000016, // $1.6 / MTok
+    },
+    showInPlayground: true,
+  },
+  {
+    model: {
+      operator: "equals",
+      value: "claude-haiku-4-5-20251001",
+    },
+    cost: {
+      prompt_token: 0.000001,
+      prompt_cache_write_token: 0.00000125, // 5m cache write: $1.25 / MTok
+      prompt_cache_read_token: 0.0000001, // Cache hits/refreshes: $0.1 / MTok
+      completion_token: 0.000005,
+      prompt_cache_creation_5m: 0.00000125, // $1.25 / MTok
+      prompt_cache_creation_1h: 0.000002, // $2 / MTok
     },
     showInPlayground: true,
   },
@@ -157,8 +182,52 @@ export const costs: ModelRow[] = [
     cost: {
       prompt_token: 0.000003, // $3 / MTok
       completion_token: 0.000015, // $15 / MTok
-      prompt_cache_write_token: 0.00000375, // $3.75 / MTok
-      prompt_cache_read_token: 0.0000003, // $0.30 / MTok
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
+    },
+  },
+  {
+    model: {
+      operator: "equals",
+      value: "claude-sonnet-4-5-20250929",
+    },
+    cost: {
+      prompt_token: 0.000003, // $3 / MTok
+      completion_token: 0.000015, // $15 / MTok
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
+    },
+  },
+  {
+    model: {
+      operator: "equals",
+      value: "claude-sonnet-4-6",
+    },
+    cost: {
+      prompt_token: 0.000003, // $3 / MTok
+      completion_token: 0.000015, // $15 / MTok
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
+    },
+  },
+  {
+    model: {
+      operator: "equals",
+      value: "claude-sonnet-4-6-20260217",
+    },
+    cost: {
+      prompt_token: 0.000003, // $3 / MTok
+      completion_token: 0.000015, // $15 / MTok
+      prompt_cache_write_token: 0.00000375, // 5m cache write: $3.75 / MTok
+      prompt_cache_read_token: 0.0000003, // Cache hits/refreshes: $0.30 / MTok
+      prompt_cache_creation_5m: 0.00000375, // $3.75 / MTok
+      prompt_cache_creation_1h: 0.000006, // $6 / MTok
     },
   },
   {
@@ -169,8 +238,10 @@ export const costs: ModelRow[] = [
     cost: {
       prompt_token: 0.000015,
       completion_token: 0.000075,
-      prompt_cache_write_token: 0.00001875,
-      prompt_cache_read_token: 0.0000015,
+      prompt_cache_write_token: 0.00001875, // 5m cache write: $18.75 / MTok
+      prompt_cache_read_token: 0.0000015, // Cache hits/refreshes: $1.5 / MTok
+      prompt_cache_creation_5m: 0.00001875, // $18.75 / MTok
+      prompt_cache_creation_1h: 0.00003, // $30 / MTok
     },
   },
   {
@@ -181,9 +252,41 @@ export const costs: ModelRow[] = [
     cost: {
       prompt_token: 0.000015,
       completion_token: 0.000075,
-      prompt_cache_write_token: 0.00001875,
-      prompt_cache_read_token: 0.0000015,
+      prompt_cache_write_token: 0.00001875, // 5m cache write: $18.75 / MTok
+      prompt_cache_read_token: 0.0000015, // Cache hits/refreshes: $1.5 / MTok
+      prompt_cache_creation_5m: 0.00001875, // $18.75 / MTok
+      prompt_cache_creation_1h: 0.00003, // $30 / MTok
     },
+  },
+  {
+    model: {
+      operator: "includes",
+      value: "claude-opus-4-5",
+    },
+    cost: {
+      prompt_token: 0.000005, // $5 / MTok
+      completion_token: 0.000025, // $25 / MTok
+      prompt_cache_write_token: 0.00000625, // 5m cache write: $6.25 / MTok
+      prompt_cache_read_token: 0.0000005, // Cache hits/refreshes: $0.5 / MTok
+      prompt_cache_creation_5m: 0.00000625, // $6.25 / MTok
+      prompt_cache_creation_1h: 0.00001, // 1h cache write: $10 / MTok
+    },
+    showInPlayground: true,
+  },
+  {
+    model: {
+      operator: "includes",
+      value: "claude-opus-4-6",
+    },
+    cost: {
+      prompt_token: 0.000005, // $5 / MTok
+      completion_token: 0.000025, // $25 / MTok
+      prompt_cache_write_token: 0.00000625, // 5m cache write: $6.25 / MTok
+      prompt_cache_read_token: 0.0000005, // Cache hits/refreshes: $0.5 / MTok
+      prompt_cache_creation_5m: 0.00000625, // $6.25 / MTok
+      prompt_cache_creation_1h: 0.00001, // 1h cache write: $10 / MTok
+    },
+    showInPlayground: true,
   },
 ];
 
@@ -560,6 +663,119 @@ export const modelDetails: ModelDetailsMap = {
         "Quick-response systems",
         "Parallel processing workflows",
         "Resource-constrained environments",
+      ],
+    },
+  },
+  "claude-opus-4-5": {
+    matches: ["claude-opus-4-5-20251101", "claude-opus-4-5"],
+    searchTerms: ["claude 4.5 opus", "claude-opus-4-5", "opus 4.5", "claude-opus-4-5-20251101"],
+    info: {
+      maxTokens: 200000,
+      releaseDate: "2025-11-24",
+      description:
+        "Claude Opus 4.5 is Anthropic's flagship model released November 2025, representing the highest level of intelligence and capability. It features extended thinking, multilingual capabilities, vision processing, and exceptional performance across complex reasoning tasks with 64k max output tokens. Training data cut-off: March 2025, Training cut-off: August 2025.",
+      tradeOffs: [
+        "Premium pricing for flagship capabilities",
+        "Highest intelligence and reasoning ability",
+        "Extended output capacity (64k tokens)",
+        "Advanced thinking and reasoning features",
+      ],
+      benchmarks: {},
+      capabilities: [
+        "Extended thinking and reasoning",
+        "Complex multi-step problem solving",
+        "Advanced code generation and analysis",
+        "Vision processing (text and image inputs)",
+        "Multilingual capabilities",
+        "Tool and function calling",
+        "JSON mode support",
+        "Context window up to 200k tokens",
+        "Maximum output up to 64k tokens",
+        "Web search integration",
+      ],
+      strengths: [
+        "Highest level of intelligence",
+        "Exceptional reasoning capabilities",
+        "Extended output length (64k tokens)",
+        "Advanced thinking features",
+        "Superior complex task performance",
+        "Comprehensive multilingual support",
+        "Latest training data (March 2025)",
+        "Vision and text multimodal processing",
+      ],
+      weaknesses: [
+        "Premium pricing model",
+        "Higher latency due to advanced capabilities",
+        "Resource-intensive processing",
+      ],
+      recommendations: [
+        "Complex reasoning and analysis tasks",
+        "Advanced code generation and review",
+        "Multi-step problem solving",
+        "Research and academic applications",
+        "Long-form content generation",
+        "Complex data analysis and extraction",
+        "Vision and multimodal processing",
+        "Enterprise-critical applications",
+      ],
+    },
+  },
+  "claude-opus-4-6": {
+    matches: ["claude-opus-4-6-20260205", "claude-opus-4-6"],
+    searchTerms: ["claude 4.6 opus", "claude-opus-4-6", "opus 4.6", "claude-opus-4-6-20260205"],
+    info: {
+      maxTokens: 1000000,
+      releaseDate: "2026-02-05",
+      description:
+        "Claude Opus 4.6 is Anthropic's most capable model to date, released February 2026. Building on the intelligence of Opus 4.5, it brings new levels of reliability and precision to coding, agents, and enterprise workflows. Features a 1M context window, hybrid reasoning with extended thinking, and state-of-the-art performance (65.4% on Terminal-Bench 2.0, 72.7% on OSWorld).",
+      tradeOffs: [
+        "Premium pricing for flagship capabilities",
+        "State-of-the-art coding and agentic performance",
+        "1M context window (5x increase from 4.5)",
+        "Hybrid reasoning with instant or extended thinking",
+      ],
+      benchmarks: {
+        terminal_bench_2: 0.654,
+        osworld: 0.727,
+        biglaw_bench: 0.902,
+      },
+      capabilities: [
+        "Hybrid reasoning (instant or extended thinking)",
+        "1M token context window",
+        "Complex multi-step problem solving",
+        "Advanced code generation and analysis",
+        "Vision processing (text and image inputs)",
+        "Multilingual capabilities",
+        "Tool and function calling",
+        "JSON mode support",
+        "Maximum output up to 64k tokens",
+        "Web search integration",
+        "Multi-agent orchestration",
+      ],
+      strengths: [
+        "Industry-leading coding performance",
+        "Best computer-use model (72.7% OSWorld)",
+        "1M context window",
+        "Superior agentic task handling",
+        "Strong multi-step reasoning",
+        "Excellent code review and debugging",
+        "Reliable for enterprise workflows",
+        "Self-corrects errors autonomously",
+      ],
+      weaknesses: [
+        "Premium pricing model",
+        "Higher latency due to advanced capabilities",
+        "Resource-intensive processing",
+      ],
+      recommendations: [
+        "Production-ready code generation",
+        "Complex agentic workflows",
+        "Enterprise document processing",
+        "Large codebase migrations",
+        "Multi-agent orchestration",
+        "Long-context analysis",
+        "Cybersecurity investigations",
+        "Legal reasoning tasks",
       ],
     },
   },

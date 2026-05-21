@@ -4,7 +4,7 @@ import { fromNodeHeaders } from "better-auth/node";
 import { Pool } from "pg";
 import { Database } from "../../../../lib/db/database.types";
 import { dbExecute } from "../../../../lib/shared/db/dbExecute";
-import crypto from "crypto";
+import { SecretManager } from "@helicone-package/secrets/SecretManager";
 import {
   GenericHeaders,
   HeliconeAuthClient,
@@ -23,7 +23,10 @@ import { authenticateBearer } from "./common";
 
 export const betterAuthClient = betterAuth({
   database: new Pool({
-    connectionString: process.env.SUPABASE_DATABASE_URL,
+    connectionString: SecretManager.getSecret(
+      "SUPABASE_DATABASE_URL", // TODO remove supabase URL eventually
+      "DATABASE_URL"
+    ),
   }),
   emailAndPassword: {
     enabled: true,
@@ -188,6 +191,9 @@ limit 1
       percentLog: org?.data?.[0]?.percent_to_log ?? 100_000,
       has_onboarded: org?.data?.[0]?.has_onboarded ?? false,
       has_integrated: org?.data?.[0]?.has_integrated ?? false,
+      freeLimitExceeded:
+        (org?.data?.[0] as { free_limit_exceeded?: string | null })
+          ?.free_limit_exceeded ?? null,
     };
 
     return ok(orgResult);

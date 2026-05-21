@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 import { Database } from "../supabase/database.types";
 import { InMemoryRateLimiter } from "./lib/clients/InMemoryRateLimiter";
 import { RateLimiterDO } from "./lib/durable-objects/RateLimiterDO";
+import { BucketRateLimiterDO } from "./lib/durable-objects/BucketRateLimiterDO";
+import { Wallet } from "./lib/durable-objects/Wallet";
 import { AlertStore } from "./lib/db/AlertStore";
 import { ClickhouseClientWrapper } from "./lib/db/ClickhouseWrapper";
 import { AlertManager } from "./lib/managers/AlertManager";
@@ -16,11 +18,15 @@ import { ProviderKeysManager } from "./lib/managers/ProviderKeysManager";
 import { ProviderKeysStore } from "./lib/db/ProviderKeysStore";
 import { APIKeysStore } from "./lib/db/APIKeysStore";
 import { APIKeysManager } from "./lib/managers/APIKeysManager";
+import { SecretManagerClass } from "@helicone-package/secrets/SecretManager";
+import { ModelProviderName } from "@helicone-package/cost/models/providers";
+
+// Needed for migrations
+export { RequestBodyBufferContainer } from "./RequestBodyBuffer/RequestBodyContainer";
 
 const FALLBACK_QUEUE = "fallback-queue";
 
-export type Provider = ProviderName | "CUSTOM";
-
+export type Provider = ProviderName | "CUSTOM" | ModelProviderName;
 
 export async function hash(key: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -46,12 +52,36 @@ async function modifyEnvBasedOnPath(
   env: Env,
   request: RequestWrapper
 ): Promise<Env> {
+  const secretManager = new SecretManagerClass([
+    (key: string) => {
+      try {
+        if (typeof env[key as keyof Env] === "string") {
+          return env[key as keyof Env] as string;
+        }
+        return undefined;
+      } catch (e) {
+        return undefined;
+      }
+    },
+  ]);
+
+  // This configures all the blue <> green secrets
+  for (const key of Object.keys(env)) {
+    if (typeof env[key as keyof Env] === "string") {
+      const value = secretManager.getSecret(key);
+      if (value) {
+        env[key as keyof Env] = value as any;
+      }
+    }
+  }
+
   const url = new URL(request.getUrl());
   const host = url.host;
   const hostParts = host.split(".");
   if (request.isEU()) {
     env = {
       ...env,
+      VALHALLA_URL: env.EU_VALHALLA_URL,
       CLICKHOUSE_HOST: env.EU_CLICKHOUSE_HOST,
       CLICKHOUSE_USER: env.EU_CLICKHOUSE_USER,
       CLICKHOUSE_PASSWORD: env.EU_CLICKHOUSE_PASSWORD,
@@ -64,7 +94,10 @@ async function modifyEnvBasedOnPath(
         env.EU_REQUEST_LOGS_QUEUE_URL_LOW_PRIORITY,
       S3_REGION: "eu-west-1",
       AWS_REGION: env.EU_AWS_REGION ?? "eu-west-1",
+      HELICONE_ORG_ID: env.EU_HELICONE_ORG_ID,
     };
+
+    request.requestBodyBuffer.resetS3Client(env);
   }
   if (env.WORKER_TYPE) {
     return env;
@@ -301,7 +334,7 @@ async function modifyEnvBasedOnPath(
       return {
         ...env,
         WORKER_TYPE: "GATEWAY_API",
-        GATEWAY_TARGET: "https://api.studio.nebius.ai",
+        GATEWAY_TARGET: "https://api.tokenfactory.nebius.com",
       };
     } else if (hostParts[0] === "novita") {
       return {
@@ -518,11 +551,11 @@ export default {
 };
 
 function handleError(e: unknown): Response {
-  console.error(e);
   return new Response(
     JSON.stringify({
       "helicone-message":
-        "Helicone ran into an error servicing your request: " + e,
+        "Helicone ran into an error servicing your request" +
+        (e instanceof Error ? ": " + e.message : ""),
       support:
         "Please reach out on our discord or email us at help@helicone.ai, we'd love to help!",
       "helicone-error": JSON.stringify(e),
@@ -536,4 +569,4 @@ function handleError(e: unknown): Response {
     }
   );
 }
-export { InMemoryRateLimiter, RateLimiterDO };
+export { InMemoryRateLimiter, RateLimiterDO, BucketRateLimiterDO, Wallet };

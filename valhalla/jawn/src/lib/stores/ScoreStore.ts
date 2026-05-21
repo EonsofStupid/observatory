@@ -34,82 +34,6 @@ export class ScoreStore extends BaseStore {
     super(organizationId);
   }
 
-  public async putScoresIntoDB(
-    requestId: string,
-    scores: Score[],
-    evaluatorId?: string
-  ) {
-    try {
-      const scoreKeys = scores.map((score) => {
-        if (score.score_attribute_type === "boolean") {
-          return `${score.score_attribute_key}-hcone-bool`;
-        }
-        return score.score_attribute_key;
-      });
-      const scoreTypes = scores.map((score) => score.score_attribute_type);
-      const scoreValues = scores.map((score) => score.score_attribute_value);
-      const evaluatorIds = scores.map((_score) => evaluatorId);
-      const { data: requestData, error: requestError } = await dbExecute(
-        `SELECT id FROM request WHERE id = $1 AND helicone_org_id = $2`,
-        [requestId, this.organizationId]
-      );
-
-      if (!requestData || requestError) {
-        return err(
-          `${requestId} not found in organization ${this.organizationId}`
-        );
-      }
-
-      const organizationIds = Array(scoreKeys.length).fill(this.organizationId);
-
-      const upsertQuery = `
-        WITH upserted_attributes AS (
-            INSERT INTO score_attribute (score_key, value_type, organization, evaluator_id)
-            SELECT unnest($1::text[]), unnest($2::text[]), unnest($3::uuid[]), unnest($4::uuid[])
-            ON CONFLICT (score_key, organization) DO UPDATE SET
-                score_key = EXCLUDED.score_key,
-                value_type = EXCLUDED.value_type,
-                evaluator_id = EXCLUDED.evaluator_id
-            RETURNING id, score_key
-        )
-        SELECT id, score_key
-        FROM upserted_attributes;
-      `;
-
-      const { data: upsertedAttributes, error: upsertError } = await dbExecute(
-        upsertQuery,
-        [scoreKeys, scoreTypes, organizationIds, evaluatorIds]
-      );
-
-      if (!upsertedAttributes || upsertError) {
-        return err(`Error upserting attributes: ${upsertError}`);
-      }
-
-      const attributeIds = upsertedAttributes.map((attr: any) => attr.id);
-
-      const insertValuesQuery = `
-        INSERT INTO score_value (score_attribute, request_id, int_value)
-        SELECT unnest($1::uuid[]), $2, unnest($3::bigint[])
-        ON CONFLICT (score_attribute, request_id) DO NOTHING
-        RETURNING *;
-      `;
-
-      const { data, error } = await dbExecute(insertValuesQuery, [
-        attributeIds,
-        requestId,
-        scoreValues,
-      ]);
-
-      if (!data || error) {
-        return err(`Error adding scores: ${error}`);
-      }
-
-      return { data: "Scores added successfully", error: null };
-    } catch (error: any) {
-      return err(error.message);
-    }
-  }
-
   public async putScoresIntoClickhouse(
     newVersions: BatchScores[]
   ): Promise<Result<RequestResponseRMT[], string>> {
@@ -152,41 +76,59 @@ export class ScoreStore extends BaseStore {
           .join(", ")}`
       );
     }
-    const uniqueRequestResponseLogs = rowContents.data.reduce((acc, row) => {
-      const key = `${row.request_id}-${row.organization_id}`;
-      if (
-        !acc[key] ||
-        (row.updated_at &&
-          (!acc[key].updated_at ||
-            new Date(row.updated_at) > new Date(acc[key].updated_at)))
-      ) {
-        acc[key] = row;
-      }
-      return acc;
-    }, {} as Record<string, RequestResponseRMT>);
+    const uniqueRequestResponseLogs = rowContents.data.reduce(
+      (acc, row) => {
+        const key = `${row.request_id}-${row.organization_id}`;
+        if (
+          !acc[key] ||
+          (row.updated_at &&
+            (!acc[key].updated_at ||
+              new Date(row.updated_at) > new Date(acc[key].updated_at!)))
+        ) {
+          acc[key] = row;
+        }
+        return acc;
+      },
+      {} as Record<string, RequestResponseRMT>
+    );
 
     const filteredRequestResponseLogs = Object.values(
       uniqueRequestResponseLogs
     );
 
+    // Create a map of newVersions by request_id and organization_id for correct matching
+    const newVersionsMap = new Map(
+      newVersions.map((v) => [`${v.requestId}-${v.organizationId}`, v])
+    );
+
     const res = await clickhouseDb.dbInsertClickhouse(
       "request_response_rmt",
-      filteredRequestResponseLogs.flatMap((row, index) => {
-        const newVersion = newVersions[index];
+      filteredRequestResponseLogs.flatMap((row) => {
+        const key = `${row.request_id}-${row.organization_id}`;
+        const newVersion = newVersionsMap.get(key);
+
+        // Skip if no matching newVersion found (shouldn't happen but be safe)
+        if (!newVersion) {
+          console.warn(`No matching newVersion for request ${row.request_id}`);
+          return [];
+        }
 
         // Merge existing scores with new scores
         const combinedScores = {
           ...(row.scores || {}),
-          ...newVersion.mappedScores.reduce((acc, score) => {
-            if (!Number.isInteger(score.score_attribute_value)) {
-              console.log(
-                `Skipping score ${score.score_attribute_key} with value ${score.score_attribute_value}`
-              );
-            } else {
-              acc[score.score_attribute_key] = score.score_attribute_value;
-            }
-            return acc;
-          }, {} as Record<string, number>),
+          ...newVersion.mappedScores.reduce(
+            (acc, score) => {
+              if (!Number.isInteger(score.score_attribute_value)) {
+                console.log(
+                  `Skipping score ${score.score_attribute_key} with value ${score.score_attribute_value}`
+                );
+              } else {
+                acc[score.score_attribute_key] = score.score_attribute_value;
+              }
+              return acc;
+            },
+            {} as Record<string, number>
+          ),
         };
 
         // Validate and ensure the scores are in the correct format
@@ -211,6 +153,7 @@ export class ScoreStore extends BaseStore {
             prompt_cache_read_tokens: row.prompt_cache_read_tokens,
             prompt_audio_tokens: row.prompt_audio_tokens,
             completion_audio_tokens: row.completion_audio_tokens,
+            reasoning_tokens: row.reasoning_tokens,
             model:
               row.model && row.model !== ""
                 ? row.model
@@ -233,6 +176,10 @@ export class ScoreStore extends BaseStore {
             cache_enabled: row.cache_enabled,
             cache_reference_id: row.cache_reference_id,
             cost: row.cost,
+            ai_gateway_body_mapping: row.ai_gateway_body_mapping,
+            is_passthrough_billing: row.is_passthrough_billing,
+            storage_location: row.storage_location,
+            size_bytes: row.size_bytes,
           },
         ];
       })
@@ -261,82 +208,5 @@ export class ScoreStore extends BaseStore {
     }
 
     return "";
-  }
-
-  public async bumpRequestVersion(
-    requests: { id: string; organizationId: string }[]
-  ): Promise<Result<UpdatedRequestVersion[], string>> {
-    const placeholders = requests
-      .map((_, index) => `($${index * 2 + 1}::uuid, $${index * 2 + 2}::uuid)`)
-      .join(", ");
-
-    const values = requests.flatMap((request) => [
-      request.organizationId,
-      request.id,
-    ]);
-
-    const query = `
-      UPDATE request AS r
-      SET version = r.version + 1
-      FROM (VALUES ${placeholders}) AS v(org_id, req_id)
-      WHERE r.helicone_org_id = v.org_id AND r.id = v.req_id
-      RETURNING r.id, r.version, r.provider, r.helicone_org_id
-    `;
-
-    const result = await dbExecute<UpdatedRequestVersion>(query, values);
-
-    return result;
-  }
-
-  public async bulkUpsertFeedback(
-    feedbacks: { responseId: string; rating: boolean }[]
-  ): Promise<Result<UpdatedFeedback[], string>> {
-    if (feedbacks.length === 0) {
-      return ok([]);
-    }
-
-    const validFeedbacks = feedbacks.filter(
-      (feedback) =>
-        feedback.responseId !== "00000000-0000-0000-0000-000000000000"
-    );
-
-    if (validFeedbacks.length === 0) {
-      return ok([]);
-    }
-
-    console.log(
-      `Upserting feedback for ${
-        validFeedbacks.length
-      } responses, responseIds: ${validFeedbacks
-        .map((f) => f.responseId)
-        .join(", ")}`
-    );
-
-    const placeholders = validFeedbacks
-      .map(
-        (_, index) =>
-          `($${index * 3 + 1}::uuid, $${index * 3 + 2}::boolean, $${
-            index * 3 + 3
-          }::timestamp)`
-      )
-      .join(", ");
-
-    const values = validFeedbacks.flatMap((feedback) => [
-      feedback.responseId,
-      feedback.rating,
-      new Date().toISOString(),
-    ]);
-
-    const query = `
-    INSERT INTO feedback (response_id, rating, created_at)
-    VALUES ${placeholders}
-    ON CONFLICT (response_id)
-    DO UPDATE SET
-      rating = EXCLUDED.rating,
-      created_at = EXCLUDED.created_at
-    RETURNING id, response_id, rating, created_at
-  `;
-
-    return await dbExecute<UpdatedFeedback>(query, values);
   }
 }

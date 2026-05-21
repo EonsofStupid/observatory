@@ -4,11 +4,16 @@
  */
 
 import { ModelRow } from "./interfaces/Cost";
-import { allCosts, defaultProvider, providers } from "./providers/mappings";
+import { defaultProvider, providers } from "./providers/mappings";
 import { COST_PRECISION_MULTIPLIER } from "./costCalc";
 
 export type { ModelRow } from "./interfaces/Cost";
 export { providers } from "./providers/mappings";
+export { modelCostBreakdownFromRegistry } from "./costCalc";
+export type { CostBreakdown } from "./models/calculate-cost";
+export { getUsageProcessor } from "./usage/getUsageProcessor";
+export type { ModelUsage } from "./usage/types";
+export type { ModelProviderName } from "./models/providers";
 
 export type ModelWithProvider = {
   provider: string;
@@ -21,7 +26,7 @@ export function costOf({
 }: {
   model: string;
   provider: string;
-}) {
+}): ModelRow["cost"] | null {
   const modelLower = model?.toLowerCase();
 
   if (!modelLower) {
@@ -50,7 +55,7 @@ export function costOf({
     }
   });
 
-  return cost?.cost;
+  return cost?.cost ?? null;
 }
 
 export function costOfPrompt({
@@ -62,6 +67,8 @@ export function costOfPrompt({
   promptAudioTokens,
   completionTokens,
   completionAudioTokens,
+  promptCacheWrite5m,
+  promptCacheWrite1h,
   images = 1,
   perCall = 1,
   multiple,
@@ -74,10 +81,12 @@ export function costOfPrompt({
   promptAudioTokens: number;
   completionTokens: number;
   completionAudioTokens: number;
+  promptCacheWrite5m?: number;
+  promptCacheWrite1h?: number;
   images?: number;
   perCall?: number;
   multiple?: number;
-}) {
+}): number | null {
   const cost = costOf({ model, provider });
   if (!cost) {
     return null;
@@ -90,7 +99,19 @@ export function costOfPrompt({
 
   // Add cost for cache write tokens if applicable
   if (cost.prompt_cache_write_token && promptCacheWriteTokens > 0) {
-    totalCost += promptCacheWriteTokens * cost.prompt_cache_write_token;
+    // For anthropic requests, the prompt cache write tokens are the sum of the 5m and 1h writes
+    // so we subtract to not double count
+    const effectivePromptCacheWriteTokens =
+      promptCacheWriteTokens -
+      (promptCacheWrite5m ?? 0) -
+      (promptCacheWrite1h ?? 0);
+    totalCost += effectivePromptCacheWriteTokens * cost.prompt_cache_write_token;
+    if (cost.prompt_cache_creation_5m && promptCacheWrite5m && promptCacheWrite5m > 0) {
+      totalCost += promptCacheWrite5m * cost.prompt_cache_creation_5m;
+    }
+    if (cost.prompt_cache_creation_1h && promptCacheWrite1h && promptCacheWrite1h > 0) {
+      totalCost += promptCacheWrite1h * cost.prompt_cache_creation_1h;
+    }
   } else if (promptCacheWriteTokens > 0) {
     totalCost += promptCacheWriteTokens * cost.prompt_token;
   }

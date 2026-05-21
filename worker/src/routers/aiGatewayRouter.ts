@@ -1,24 +1,16 @@
 import { createClient } from "@supabase/supabase-js";
 import { Database } from "../../supabase/database.types";
-import { tryJSONParse } from "../lib/clients/llmmapper/llmmapper";
 import { RequestWrapper } from "../lib/RequestWrapper";
 import { BaseRouter } from "./routerFactory";
-import { APIKeysStore } from "../lib/db/APIKeysStore";
-import {
-  getBody,
-  authenticate,
-  attemptModelRequestWithFallback,
-} from "../lib/util/aiGateway";
-import { gatewayForwarder } from "./gatewayRouter";
-import { ProviderKeysManager } from "../lib/managers/ProviderKeysManager";
-import { ProviderKeysStore } from "../lib/db/ProviderKeysStore";
-import { isErr } from "../lib/util/results";
-import { PromptManager } from "../lib/managers/PromptManager";
-import { HeliconePromptManager } from "@helicone-package/prompts/HeliconePromptManager";
-import { PromptStore } from "../lib/db/PromptStore";
+import { SimpleAIGateway } from "../lib/ai-gateway/SimpleAIGateway";
+import { GatewayMetrics } from "../lib/ai-gateway/GatewayMetrics";
+import { getDataDogClient } from "../lib/monitoring/DataDogClient";
+import { DBWrapper } from "../lib/db/DBWrapper";
+import { createDataDogTracer } from "../lib/monitoring/DataDogTracer";
+import { registry } from "@helicone-package/cost/models/registry";
 
 export const getAIGatewayRouter = (router: BaseRouter) => {
-  router.all(
+  router.post(
     "*",
     async (
       _,
@@ -27,28 +19,29 @@ export const getAIGatewayRouter = (router: BaseRouter) => {
       ctx: ExecutionContext
     ) => {
       requestWrapper.setRequestReferrer("ai-gateway");
-      function forwarder(targetBaseUrl: string | null) {
-        return gatewayForwarder(
-          {
-            targetBaseUrl,
-            setBaseURLOverride: (url) => {
-              requestWrapper.setBaseURLOverride(url);
-            },
-          },
-          requestWrapper,
-          env,
-          ctx
+
+      try {
+        const pathLower = new URL(
+          requestWrapper.getUrl()
+        ).pathname.toLowerCase();
+        const existingMapping = requestWrapper.headers.get(
+          "Helicone-Gateway-Body-Mapping"
         );
+        if (
+          (!existingMapping || existingMapping === "OPENAI") &&
+          pathLower.includes("v1/responses")
+        ) {
+          const headers = new Headers(requestWrapper.headers);
+          headers.set("Helicone-Gateway-Body-Mapping", "RESPONSES");
+          requestWrapper.remapHeaders(headers);
+          requestWrapper.heliconeHeaders.gatewayConfig.bodyMapping =
+            "RESPONSES";
+        }
+      } catch (_e) {
+        // ignore URL parsing issues
       }
 
-      const body = await getBody(requestWrapper);
-      const parsedBody = tryJSONParse(body ?? "{}");
-      if (!parsedBody || !parsedBody.model) {
-        return new Response("Invalid body or missing model", { status: 400 });
-      }
-
-      const models = parsedBody.model.split(",").map((m) => m.trim());
-
+      // Authenticate first
       const isEU = requestWrapper.isEU();
       const supabaseClient = isEU
         ? createClient<Database>(
@@ -60,45 +53,207 @@ export const getAIGatewayRouter = (router: BaseRouter) => {
             env.SUPABASE_SERVICE_ROLE_KEY
           );
 
-      const { orgId, rawAPIKey } = await authenticate(
-        requestWrapper,
-        env,
-        new APIKeysStore(supabaseClient)
+      // Initialize DataDog tracer for timing instrumentation
+      const tracer = createDataDogTracer(env);
+      const traceContext = tracer.startTrace(
+        "ai_gateway",
+        requestWrapper.getUrl(),
+        {
+          http_method: requestWrapper.getMethod(),
+        }
       );
 
-      if (!orgId || !rawAPIKey) {
-        return new Response("Invalid API key", { status: 401 });
-      }
+      const rawAPIKey = requestWrapper.getRawProviderAuthHeader();
 
-      const result = await attemptModelRequestWithFallback({
-        models,
-        requestWrapper,
-        forwarder,
-        providerKeysManager: new ProviderKeysManager(
-          new ProviderKeysStore(supabaseClient),
-          env
-        ),
-        promptManager: new PromptManager(
-          new HeliconePromptManager({
-            apiKey: rawAPIKey,
-            baseUrl: env.VALHALLA_URL,
-          }),
-          new PromptStore(supabaseClient),
-          env
-        ),
-        orgId,
-        parsedBody,
-      });
+      // Timing: Hash API key
+      const hashSpan = tracer.startSpan(
+        "ai_gateway.auth.hash_api_key",
+        "getProviderAuthHeader",
+        "ai-gateway",
+        {},
+        traceContext || undefined
+      );
+      const hashedAPIKey = await requestWrapper.getProviderAuthHeader();
+      tracer.finishSpan(hashSpan);
 
-      if (isErr(result)) {
-        return new Response(result.error.message, {
-          status: result.error.code,
+      if (!hashedAPIKey) {
+        tracer.finishTrace({ error: "invalid_hashed_key" });
+        ctx.waitUntil(tracer.sendTrace());
+        return new Response("Invalid Helicone API key (hshed)", {
+          status: 401,
         });
       }
 
-      return result.data;
+      // Timing: Validate API key
+      const authSpan = tracer.startSpan(
+        "ai_gateway.auth.validate_key",
+        "requestWrapper.auth",
+        "ai-gateway",
+        {},
+        traceContext || undefined
+      );
+      const { data: auth, error: authError } = await requestWrapper.auth();
+      tracer.finishSpan(authSpan);
+
+      if (authError || !auth || !rawAPIKey) {
+        console.error(authError);
+        tracer.setError(authSpan, authError?.toString() || "Invalid API key");
+        tracer.finishTrace({ error: "auth_failed" });
+        ctx.waitUntil(tracer.sendTrace());
+        return new Response("Invalid Helicone API key", { status: 401 });
+      }
+
+      const db = new DBWrapper(env, auth);
+
+      // Timing: Get auth params
+      const dbSpan = tracer.startSpan(
+        "ai_gateway.db.get_auth_params",
+        "getAuthParams",
+        "ai-gateway",
+        {},
+        traceContext || undefined
+      );
+      const { data: orgData, error: orgError } = await db.getAuthParams();
+      tracer.finishSpan(dbSpan);
+      if (orgError || !orgData) {
+        tracer.finishTrace({ error: "org_not_found" });
+        ctx.waitUntil(tracer.sendTrace());
+        return new Response("Organization not found", { status: 401 });
+      }
+
+      // Set org_id as a core primitive for all spans in this trace
+      tracer.setOrgId(orgData.organizationId);
+
+      const dataDogClient = getDataDogClient(env);
+      const metrics = new GatewayMetrics(dataDogClient);
+
+      // Create gateway with authenticated context
+      const gateway = new SimpleAIGateway(
+        requestWrapper,
+        env,
+        ctx,
+        {
+          orgId: orgData?.organizationId,
+          apiKey: rawAPIKey,
+          supabaseClient,
+          orgMeta: orgData?.metaData,
+        },
+        metrics,
+        tracer,
+        traceContext
+      );
+
+      const response = await gateway.handle();
+
+      // Finish trace and send to DataDog
+      tracer.finishTrace();
+      ctx.waitUntil(tracer.sendTrace());
+
+      return response;
     }
   );
+
+  // GET /v1/models endpoint - OpenAI compatible
+  router.get("/v1/models", async () => {
+    try {
+      const allModelsResult = registry.getAllModelsWithIds();
+      if (allModelsResult.error) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "Failed to fetch models from registry",
+              type: "internal_error",
+            },
+          }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+
+      interface OAIModel {
+        id: string;
+        object: "model";
+        created: number;
+        owned_by: string;
+      }
+
+      const dateToUnixTimestamp = (dateString?: string): number => {
+        if (!dateString) {
+          return Math.floor(new Date("2024-01-01").getTime() / 1000);
+        }
+        return Math.floor(new Date(dateString).getTime() / 1000);
+      };
+
+      const oaiModels: OAIModel[] = [];
+
+      for (const [modelId, modelConfig] of Object.entries(
+        allModelsResult.data!
+      )) {
+        const endpointsResult = registry.getEndpointsByModel(modelId);
+        if (
+          !endpointsResult.data ||
+          endpointsResult.data.length === 0 ||
+          endpointsResult.error
+        ) {
+          continue;
+        }
+
+        const allEndpointsRequireExplicitRouting = endpointsResult.data.every(
+          (ep: any) => ep.modelConfig.requireExplicitRouting === true
+        );
+        if (allEndpointsRequireExplicitRouting) {
+          continue;
+        }
+
+        oaiModels.push({
+          id: modelId,
+          object: "model",
+          created: dateToUnixTimestamp((modelConfig as any).created),
+          owned_by: (modelConfig as any).author,
+        });
+      }
+
+      return new Response(
+        JSON.stringify({
+          object: "list",
+          data: oaiModels,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    } catch (error) {
+      console.error("Error fetching models:", error);
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "Internal server error while fetching models",
+            type: "internal_error",
+          },
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+  });
+
+  // Catch-all for non-POST methods
+  router.all("*", async () => {
+    return new Response(
+      "Method not allowed. AI Gateway only accepts POST requests.",
+      {
+        status: 405,
+        headers: {
+          Allow: "POST, GET",
+        },
+      }
+    );
+  });
 
   return router;
 };

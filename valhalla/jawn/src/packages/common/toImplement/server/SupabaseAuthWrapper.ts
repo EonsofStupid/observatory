@@ -17,6 +17,7 @@ import { KVCache } from "../../../../lib/cache/kvCache";
 import { Database } from "../../../../lib/db/database.types";
 import { SupabaseClient } from "@supabase/supabase-js";
 import { hashAuth } from "../../../../lib/db/hash";
+import { SecretManager } from "@helicone-package/secrets/SecretManager";
 import { cacheResultCustom } from "../../../../utils/cacheResult";
 import { authenticateBearer } from "./common";
 
@@ -27,10 +28,20 @@ export class SupabaseConnector {
   connected: boolean = false;
 
   constructor() {
-    const SUPABASE_CREDS = JSON.parse(process.env.SUPABASE_CREDS ?? "{}");
-    const supabaseURL = SUPABASE_CREDS?.url ?? process.env.SUPABASE_URL;
+    const SUPABASE_CREDS = JSON.parse(
+      SecretManager.getSecret("SUPABASE_CREDS") ?? "{}"
+    );
+    const supabaseURL =
+      SUPABASE_CREDS?.url ??
+      process.env.SUPABASE_URL ??
+      SecretManager.getSecret("SUPABASE_URL");
     const supabaseServiceRoleKey =
-      SUPABASE_CREDS?.service_role_key ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+      SUPABASE_CREDS?.service_role_key ??
+      process.env.SUPABASE_SERVICE_ROLE_KEY ??
+      SecretManager.getSecret(
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_KEY"
+      );
     if (!supabaseURL) {
       throw new Error("No Supabase URL");
     }
@@ -116,7 +127,7 @@ export class SupabaseConnector {
       return err("Proxy key not found in storedProxyKey");
     }
 
-    const verified = await this.client.rpc("verify_helicone_proxy_key", {
+    const verified = await (this.client.rpc as any)("verify_helicone_proxy_key", {
       api_key: proxyKey,
       stored_hashed_key: storedProxyKey.data.helicone_proxy_key,
     });
@@ -217,6 +228,9 @@ export class SupabaseConnector {
       percentLog: data.percent_to_log ?? 100_000,
       has_onboarded: data.has_onboarded ?? false,
       has_integrated: data.has_integrated ?? false,
+      freeLimitExceeded:
+        (data as { free_limit_exceeded?: string | null }).free_limit_exceeded ??
+        null,
     };
 
     return ok(orgResult);

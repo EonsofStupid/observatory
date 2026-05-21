@@ -12,7 +12,7 @@ interface LivePillProps {
 export default function LivePill(props: LivePillProps) {
   const { isLive, setIsLive, isDataLoading, isRefetching, refetch } = props;
   return (
-    <div className="flex h-8 w-full flex-row items-center justify-between divide-x divide-border rounded-lg border border-border bg-slate-50 dark:bg-slate-950">
+    <div className="flex h-8 flex-row items-center divide-x divide-border rounded-lg border border-border bg-slate-50 dark:bg-slate-950">
       <Button
         variant="none"
         size="none"
@@ -40,8 +40,11 @@ export default function LivePill(props: LivePillProps) {
       >
         <ArrowPathIcon
           className={clsx(
-            isDataLoading || isRefetching ? "animate-spin" : "",
-            "inline h-4 w-4 duration-500 ease-in-out",
+            isDataLoading || isRefetching
+              ? "animate-spin duration-500 ease-in-out"
+              : "",
+            isLive ? "animate-spin duration-1000" : "",
+            "inline h-4 w-4",
           )}
         />
       </Button>

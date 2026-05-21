@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Input } from "@/components/ui/input";
+import { getJawnClient } from "@/lib/clients/jawn";
 import {
   Select,
   SelectContent,
@@ -9,210 +11,213 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { 
+import {
   Search,
-  Zap,
   ArrowUpDown,
-  Filter,
-  Cpu,
-  ArrowRight,
-  Copy,
+  Clipboard,
   Check,
-  Eye,
-  Code,
-  FileJson,
-  Gauge,
-  DollarSign,
-  Calendar,
-  Info
+  X,
+  Filter,
+  Info,
+  Plus,
+  GitCompare,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { RequestModelModal } from "./RequestModelModal";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { useModelFiltering } from "@/hooks/useModelFiltering";
+import { Model, SortOption } from "@/lib/filters/modelFilters";
+import { components } from "@/lib/clients/jawnTypes/public";
+import { FilterSection } from "@/components/ui/filters/FilterSection";
+import { FilterOption } from "@/components/ui/filters/FilterOption";
+import { SliderFilter } from "@/components/ui/filters/SliderFilter";
+import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { CopyButton } from "@/components/ui/CopyButton";
+import {
+  INPUT_MODALITIES,
+  OUTPUT_MODALITIES,
+  MODALITY_LABELS,
+} from "@/lib/constants/modalities";
+import Link from "next/link";
 
-interface ModelEndpoint {
-  provider: string;
-  region?: string;
-  pricing: {
-    prompt: number;
-    completion: number;
-  };
-  supportsPtb?: boolean;
-}
-
-interface Model {
-  id: string;
-  name: string;
-  author: string;
-  contextLength: number;
-  endpoints: ModelEndpoint[];
-  // New fields for better UX
-  capabilities?: {
-    vision?: boolean;
-    functionCalling?: boolean;
-    jsonMode?: boolean;
-    streaming?: boolean;
-  };
-  maxOutput?: number;
-  trainingDate?: string;
-  description?: string;
-  speed?: 'fast' | 'medium' | 'slow';
-  quality?: 'high' | 'medium' | 'budget';
-}
-
-type SortOption = "name" | "price-low" | "price-high" | "context" | "value" | "speed" | "newest";
-type ContextFilter = "all" | "small" | "medium" | "large" | "xlarge";
-type PriceFilter = "all" | "free" | "cheap" | "moderate" | "expensive";
+type ModelRegistryResponse = components["schemas"]["ModelRegistryResponse"];
 
 export function ModelRegistryPage() {
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedProvider, setSelectedProvider] = useState<string>("all");
-  const [selectedAuthor, setSelectedAuthor] = useState<string>("all");
-  const [models, setModels] = useState<Model[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [sortBy, setSortBy] = useState<SortOption>("name");
-  const [copiedModel, setCopiedModel] = useState<string | null>(null);
-  const [contextFilter, setContextFilter] = useState<ContextFilter>("all");
-  const [priceFilter, setPriceFilter] = useState<PriceFilter>("all");
-  const [capabilityFilters, setCapabilityFilters] = useState({
-    vision: false,
-    functionCalling: false,
-    jsonMode: false,
-    streaming: false,
-  });
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
+  // Memoize the jawn client to prevent recreating on every render
+  const jawnClient = useMemo(() => getJawnClient(), []);
+
+  // State for all models (fetched once)
+  const [allModels, setAllModels] = useState<Model[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Filter states from URL
+  const [searchQuery, setSearchQuery] = useState(
+    searchParams.get("search") || ""
+  );
+  const [selectedProviders, setSelectedProviders] = useState<Set<string>>(
+    new Set(searchParams.get("providers")?.split(",").filter(Boolean) || [])
+  );
+  const [priceRange, setPriceRange] = useState<[number, number]>([
+    Number(searchParams.get("priceMin") || 0),
+    Number(searchParams.get("priceMax") || 200),
+  ]);
+  const [minContextSize, setMinContextSize] = useState<number>(
+    Number(searchParams.get("contextMin") || 0)
+  );
+  const [selectedCapabilities, setSelectedCapabilities] = useState<Set<string>>(
+    new Set(searchParams.get("capabilities")?.split(",").filter(Boolean) || [])
+  );
+  const [selectedInputModalities, setSelectedInputModalities] = useState<
+    Set<string>
+  >(
+    new Set(
+      searchParams.get("inputModalities")?.split(",").filter(Boolean) || []
+    )
+  );
+  const [selectedOutputModalities, setSelectedOutputModalities] = useState<
+    Set<string>
+  >(
+    new Set(
+      searchParams.get("outputModalities")?.split(",").filter(Boolean) || []
+    )
+  );
+  const [showPtbOnly, setShowPtbOnly] = useState<boolean>(
+    searchParams.get("ptb") === "true"
+  );
+  const [sortBy, setSortBy] = useState<SortOption>(
+    (searchParams.get("sort") as SortOption) || "newest"
+  );
+
+
+  // Use client-side filtering hook
+  const { filteredModels, totalModels, availableFilters, isFiltered } =
+    useModelFiltering({
+      models: allModels,
+      search: searchQuery,
+      selectedProviders,
+      priceRange,
+      minContextSize,
+      selectedCapabilities,
+      selectedInputModalities,
+      selectedOutputModalities,
+      showPtbOnly,
+      sortBy,
+    });
+
+  // Collapsible filter sections
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(
+    new Set([
+      "providers",
+      "price",
+      "context",
+      "capabilities",
+      "inputModalities",
+      "outputModalities",
+    ])
+  );
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [requestModalOpen, setRequestModalOpen] = useState(false);
+
+  const toggleSection = (section: string) => {
+    const newSet = new Set(expandedSections);
+    if (newSet.has(section)) {
+      newSet.delete(section);
+    } else {
+      newSet.add(section);
+    }
+    setExpandedSections(newSet);
+  };
+
+  // Fetch all models once on mount
   useEffect(() => {
-    async function loadData() {
+    const fetchModels = async () => {
       try {
-        const response = await fetch("/api/models");
-        const data = await response.json();
-        setModels(data.models || []);
+        setLoading(true);
+
+        const response = await jawnClient.GET(
+          "/v1/public/model-registry/models"
+        );
+
+        if (response.data?.data) {
+          const data = response.data.data as ModelRegistryResponse;
+          // Cast to Model[] - the API types have slight differences but runtime data is compatible
+          setAllModels(data.models as unknown as Model[]);
+        }
       } catch (error) {
         console.error("Failed to load models:", error);
       } finally {
         setLoading(false);
       }
-    }
-    
-    loadData();
-  }, []);
-
-  const { allProviders, allAuthors } = useMemo(() => {
-    const providers = new Set<string>();
-    const authors = new Set<string>();
-    
-    models.forEach((model) => {
-      authors.add(model.author);
-      model.endpoints.forEach((endpoint) => {
-        providers.add(endpoint.provider);
-      });
-    });
-    
-    return {
-      allProviders: Array.from(providers).sort(),
-      allAuthors: Array.from(authors).sort(),
     };
-  }, [models]);
 
-  const processedModels = useMemo(() => {
-    let filtered = models.filter((model) => {
-      // Search filter
-      const matchesSearch = searchQuery
-        ? model.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          model.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          model.author.toLowerCase().includes(searchQuery.toLowerCase())
-        : true;
+    fetchModels();
+  }, [jawnClient]);
 
-      // Provider filter
-      const matchesProvider =
-        selectedProvider === "all"
-          ? true
-          : model.endpoints.some((ep) => ep.provider === selectedProvider);
+  // Update URL when filters change
+  useEffect(() => {
+    // Only run on client side
+    if (typeof window === "undefined") return;
 
-      // Author filter
-      const matchesAuthor =
-        selectedAuthor === "all" ? true : model.author === selectedAuthor;
+    const params = new URLSearchParams();
 
-      // Context size filter
-      const matchesContext = (() => {
-        switch (contextFilter) {
-          case "small": return model.contextLength <= 32000;
-          case "medium": return model.contextLength > 32000 && model.contextLength <= 128000;
-          case "large": return model.contextLength > 128000 && model.contextLength <= 200000;
-          case "xlarge": return model.contextLength > 200000;
-          default: return true;
-        }
-      })();
+    if (searchQuery) params.set("search", searchQuery);
+    if (selectedProviders.size > 0) {
+      params.set("providers", Array.from(selectedProviders).sort().join(","));
+    }
+    if (priceRange[0] > 0) params.set("priceMin", priceRange[0].toString());
+    if (priceRange[1] < 200) params.set("priceMax", priceRange[1].toString());
+    if (minContextSize > 0) params.set("contextMin", minContextSize.toString());
+    if (selectedCapabilities.size > 0) {
+      params.set(
+        "capabilities",
+        Array.from(selectedCapabilities).sort().join(",")
+      );
+    }
+    if (selectedInputModalities.size > 0) {
+      params.set(
+        "inputModalities",
+        Array.from(selectedInputModalities).sort().join(",")
+      );
+    }
+    if (selectedOutputModalities.size > 0) {
+      params.set(
+        "outputModalities",
+        Array.from(selectedOutputModalities).sort().join(",")
+      );
+    }
+    if (showPtbOnly) params.set("ptb", "true");
+    if (sortBy !== "newest") params.set("sort", sortBy);
 
-      // Price filter
-      const minCost = Math.min(...model.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2));
-      const matchesPrice = (() => {
-        const avgDollarsPerM = minCost / 1000000 * 1000; // Convert to per million
-        switch (priceFilter) {
-          case "free": return avgDollarsPerM === 0;
-          case "cheap": return avgDollarsPerM > 0 && avgDollarsPerM <= 0.5;
-          case "moderate": return avgDollarsPerM > 0.5 && avgDollarsPerM <= 5;
-          case "expensive": return avgDollarsPerM > 5;
-          default: return true;
-        }
-      })();
+    const newUrl = params.toString()
+      ? `/models?${params.toString()}`
+      : "/models";
 
-      // Capability filters
-      const matchesCapabilities = 
-        (!capabilityFilters.vision || model.capabilities?.vision) &&
-        (!capabilityFilters.functionCalling || model.capabilities?.functionCalling) &&
-        (!capabilityFilters.jsonMode || model.capabilities?.jsonMode) &&
-        (!capabilityFilters.streaming || model.capabilities?.streaming);
+    router.push(newUrl, { scroll: false });
+  }, [
+    searchQuery,
+    selectedProviders,
+    priceRange,
+    minContextSize,
+    selectedCapabilities,
+    selectedInputModalities,
+    selectedOutputModalities,
+    showPtbOnly,
+    sortBy,
+    router,
+  ]);
 
-      return matchesSearch && matchesProvider && matchesAuthor && matchesContext && matchesPrice && matchesCapabilities;
-    });
-
-    // Sorting
-    filtered.sort((a, b) => {
-      switch (sortBy) {
-        case "name":
-          return a.name.localeCompare(b.name);
-        case "price-low":
-          const aMin = Math.min(...a.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2));
-          const bMin = Math.min(...b.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2));
-          return aMin - bMin;
-        case "price-high":
-          const aMax = Math.max(...a.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2));
-          const bMax = Math.max(...b.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2));
-          return bMax - aMax;
-        case "context":
-          return b.contextLength - a.contextLength;
-        case "value":
-          // Sort by quality/price ratio (simplified)
-          const aValue = (a.quality === 'high' ? 3 : a.quality === 'medium' ? 2 : 1) / 
-                         Math.max(0.01, Math.min(...a.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2)) / 1000000);
-          const bValue = (b.quality === 'high' ? 3 : b.quality === 'medium' ? 2 : 1) / 
-                         Math.max(0.01, Math.min(...b.endpoints.map(e => (e.pricing.prompt + e.pricing.completion) / 2)) / 1000000);
-          return bValue - aValue;
-        case "speed":
-          const speedOrder = { 'fast': 1, 'medium': 2, 'slow': 3 };
-          return (speedOrder[a.speed || 'medium'] || 2) - (speedOrder[b.speed || 'medium'] || 2);
-        case "newest":
-          return (b.trainingDate || '').localeCompare(a.trainingDate || '');
-        default:
-          return 0;
-      }
-    });
-
-    return filtered;
-  }, [models, searchQuery, selectedProvider, selectedAuthor, sortBy, contextFilter, priceFilter, capabilityFilters]);
-
-  const formatCost = (cost: number) => {
-    const dollarsPerM = (cost / 1000000) * 1000; // Convert to per million
-    if (dollarsPerM === 0) return "Free";
-    if (dollarsPerM < 1) return `$${dollarsPerM.toFixed(2)}/M`;
-    return `$${dollarsPerM.toFixed(1)}/M`;
+  const formatCost = (costPerMillion: number) => {
+    if (costPerMillion === 0) return "Free";
+    if (costPerMillion < 1) return `$${costPerMillion.toFixed(2)}/M`;
+    return `$${costPerMillion.toFixed(1)}/M`;
   };
 
   const formatContext = (tokens: number) => {
@@ -225,375 +230,496 @@ export function ModelRegistryPage() {
     return tokens.toString();
   };
 
-  const copyModelId = (modelId: string) => {
-    navigator.clipboard.writeText(modelId);
-    setCopiedModel(modelId);
-    setTimeout(() => setCopiedModel(null), 2000);
-  };
+  return (
+    <div className="bg-white dark:bg-black pt-16 lg:pt-0 flex flex-col lg:flex-row">
+      {/* Left Sidebar - Filters */}
+      <>
+        {/* Mobile overlay */}
+        {sidebarOpen && (
+          <div
+            className="lg:hidden fixed inset-0 bg-black/50 z-40"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
-        <div className="max-w-7xl mx-auto px-4 py-16">
-          <div className="animate-pulse">
-            <div className="h-8 w-48 bg-gray-200 dark:bg-gray-800 rounded mb-8" />
-            <div className="space-y-4">
-              {[...Array(10)].map((_, i) => (
-                <div key={i} className="h-16 bg-white dark:bg-gray-900 rounded" />
-              ))}
+        {/* Sidebar */}
+        <div
+          className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"
+            } lg:translate-x-0 fixed lg:sticky lg:top-16 w-[75vw] lg:w-80 lg:flex-shrink-0 transition-transform duration-300 z-50 lg:z-10 left-0 top-0 h-screen lg:h-[calc(100vh-4rem)] bg-white dark:bg-gray-900 lg:border-r border-gray-200 dark:border-gray-800 overflow-y-auto shadow-xl lg:shadow-none lg:self-start`}
+        >
+          <div className="p-6">
+            {/* Mobile close button */}
+            <div className="lg:hidden flex justify-between items-center mb-4">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                Filters
+              </h2>
+              <button
+                onClick={() => setSidebarOpen(false)}
+                className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            {/* Provider Filter */}
+            <FilterSection
+              title="Providers"
+              expanded={expandedSections.has("providers")}
+              onToggle={() => toggleSection("providers")}
+            >
+              <div className="space-y-1 max-h-48 overflow-y-auto pr-2">
+                {availableFilters.providers.map((provider) => {
+                  const providerName =
+                    typeof provider === "string" ? provider : provider.name;
+                  const displayName =
+                    typeof provider === "string"
+                      ? provider
+                      : provider.displayName;
+                  const isSelected = selectedProviders.has(providerName);
+                  return (
+                    <FilterOption
+                      key={providerName}
+                      label={displayName}
+                      selected={isSelected}
+                      onToggle={() => {
+                        const newSet = new Set(selectedProviders);
+                        if (isSelected) {
+                          newSet.delete(providerName);
+                        } else {
+                          newSet.add(providerName);
+                        }
+                        setSelectedProviders(newSet);
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </FilterSection>
+
+            {/* Price Range Filter */}
+            <FilterSection
+              title="Price Range"
+              expanded={expandedSections.has("price")}
+              onToggle={() => toggleSection("price")}
+            >
+              <SliderFilter
+                value={priceRange}
+                onChange={(value) => setPriceRange(value as [number, number])}
+                min={0}
+                max={200}
+                formatLabel={(value) => {
+                  const [min, max] = value as [number, number];
+                  const formatPrice = (v: number) =>
+                    v < 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(0)}`;
+                  return `${formatPrice(min)} - ${formatPrice(max)}/M tokens`;
+                }}
+                formatValue={(value) => {
+                  if (value < 1) return `$${value.toFixed(2)}`;
+                  return `$${value.toFixed(0)}`;
+                }}
+                showTicks
+                weighted
+              />
+            </FilterSection>
+
+            {/* Context Size Filter */}
+            <FilterSection
+              title="Context Size"
+              expanded={expandedSections.has("context")}
+              onToggle={() => toggleSection("context")}
+            >
+              <SliderFilter
+                value={minContextSize}
+                onChange={(value) => setMinContextSize(value as number)}
+                min={0}
+                max={1000000}
+                step={1000}
+                label="Minimum"
+                formatLabel={(value) => {
+                  const size = value as number;
+                  if (size >= 1000000) return `${(size / 1000000).toFixed(1)}M tokens`;
+                  if (size >= 1000) return `${(size / 1000).toFixed(0)}K tokens`;
+                  return `${size} tokens`;
+                }}
+                formatValue={(value) => {
+                  if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+                  if (value >= 1000) return `${(value / 1000).toFixed(0)}K`;
+                  return `${value}`;
+                }}
+                showTicks
+              />
+            </FilterSection>
+
+            {/* Capabilities Filter */}
+            <FilterSection
+              title="Special Capabilities"
+              expanded={expandedSections.has("capabilities")}
+              onToggle={() => toggleSection("capabilities")}
+            >
+              <div className="space-y-1">
+                {availableFilters.capabilities.map((capability) => {
+                  const isSelected = selectedCapabilities.has(capability);
+                  const labelMap: Record<string, string> = {
+                    audio: "Audio Processing",
+                    video: "Video Processing",
+                    thinking: "Chain-of-Thought",
+                    web_search: "Web Search",
+                    image: "Image Processing",
+                    caching: "Caching",
+                    reasoning: "Reasoning",
+                  };
+
+                  return (
+                    <FilterOption
+                      key={capability}
+                      label={labelMap[capability] || capability}
+                      selected={isSelected}
+                      onToggle={() => {
+                        const newSet = new Set(selectedCapabilities);
+                        if (isSelected) {
+                          newSet.delete(capability);
+                        } else {
+                          newSet.add(capability);
+                        }
+                        setSelectedCapabilities(newSet);
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </FilterSection>
+
+            {/* Input Modalities Filter */}
+            <FilterSection
+              title="Input Modalities"
+              expanded={expandedSections.has("inputModalities")}
+              onToggle={() => toggleSection("inputModalities")}
+            >
+              <div className="space-y-1">
+                {INPUT_MODALITIES.map((modality) => {
+                  const isSelected = selectedInputModalities.has(modality);
+
+                  return (
+                    <FilterOption
+                      key={modality}
+                      label={MODALITY_LABELS[modality]}
+                      selected={isSelected}
+                      onToggle={() => {
+                        const newSet = new Set(selectedInputModalities);
+                        if (isSelected) {
+                          newSet.delete(modality);
+                        } else {
+                          newSet.add(modality);
+                        }
+                        setSelectedInputModalities(newSet);
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </FilterSection>
+
+            {/* Output Modalities Filter */}
+            <FilterSection
+              title="Output Modalities"
+              expanded={expandedSections.has("outputModalities")}
+              onToggle={() => toggleSection("outputModalities")}
+            >
+              <div className="space-y-1">
+                {OUTPUT_MODALITIES.map((modality) => {
+                  const isSelected = selectedOutputModalities.has(modality);
+
+                  return (
+                    <FilterOption
+                      key={modality}
+                      label={MODALITY_LABELS[modality]}
+                      selected={isSelected}
+                      onToggle={() => {
+                        const newSet = new Set(selectedOutputModalities);
+                        if (isSelected) {
+                          newSet.delete(modality);
+                        } else {
+                          newSet.add(modality);
+                        }
+                        setSelectedOutputModalities(newSet);
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </FilterSection>
+          </div>
+        </div>
+      </>
+
+      {/* Right Content - Table */}
+      <div className="flex-1 min-w-0">
+        {/* Controls Box */}
+        <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 sticky top-[58px] z-10">
+          <div className="p-4 lg:p-6">
+            <div className="flex flex-col gap-4">
+              {/* Search bar and sort */}
+              <div className="flex flex-col lg:flex-row gap-3">
+                {/* Search bar */}
+                <div className="relative lg:flex-1">
+                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    placeholder="Search models..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="pl-9 h-9 bg-transparent border-input"
+                  />
+                </div>
+
+                {/* Mobile filter button */}
+                <button
+                  onClick={() => setSidebarOpen(!sidebarOpen)}
+                  className="lg:hidden flex items-center justify-center gap-2 px-3 h-9 border border-input rounded-md text-sm text-foreground bg-transparent shadow-sm hover:bg-accent hover:text-accent-foreground"
+                >
+                  <Filter className="h-4 w-4 opacity-50" />
+                  <span>Filters</span>
+                </button>
+
+                {/* PTB Toggle */}
+                <TooltipProvider>
+                  <div className="flex items-center gap-2 px-3 h-9 border border-input rounded-md bg-transparent shadow-sm">
+                    <div className="flex items-center gap-1.5">
+                      <label
+                        htmlFor="ptb-toggle"
+                        className="text-sm text-foreground whitespace-nowrap"
+                      >
+                        Credits
+                      </label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs">
+                          <p>
+                            Only show models that can be used with Helicone
+                            Credits. Add credits to your account to access these
+                            models without needing individual provider API keys.
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <Switch
+                      id="ptb-toggle"
+                      checked={showPtbOnly}
+                      onCheckedChange={setShowPtbOnly}
+                      className="data-[state=checked]:bg-blue-600"
+                    />
+                  </div>
+                </TooltipProvider>
+
+                {/* Sort dropdown */}
+                <Select
+                  value={sortBy}
+                  onValueChange={(v) => setSortBy(v as SortOption)}
+                >
+                  <SelectTrigger className="w-full lg:w-[160px]">
+                    <ArrowUpDown className="h-4 w-4 mr-2 opacity-50" />
+                    <SelectValue placeholder="Sort" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="name">Name</SelectItem>
+                    <SelectItem value="price-low">
+                      Price: Low to High
+                    </SelectItem>
+                    <SelectItem value="price-high">
+                      Price: High to Low
+                    </SelectItem>
+                    <SelectItem value="context">Context Size</SelectItem>
+                    <SelectItem value="newest">Newest First</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {/* Request Model Button */}
+                <button
+                  onClick={() => setRequestModalOpen(true)}
+                  className="flex items-center justify-center gap-2 px-3 h-9 border border-input rounded-md text-sm text-foreground bg-transparent shadow-sm hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap"
+                >
+                  <Plus className="h-4 w-4 opacity-50" />
+                  <span className="hidden sm:inline">Request Model</span>
+                </button>
+                {/* Compare button */}
+                <Link href="/comparison">
+                  <Button variant="outline" size="sm" className="gap-2 h-10">
+                    <GitCompare className="h-4 w-4" />
+                    Compare
+                  </Button>
+                </Link>
+              </div>
+              <div className="flex items-center">
+                <span className="text-sm text-muted-foreground">
+                  Showing {filteredModels.length} of {totalModels} models
+                </span>
+                <div className="flex justify-between items-center">
+                  {/* Reset filters button - always rendered to prevent layout shift */}
+                  <button
+                    onClick={() => {
+                      setSelectedProviders(new Set());
+                      setPriceRange([0, 200]);
+                      setMinContextSize(0);
+                      setSelectedCapabilities(new Set());
+                      setSelectedInputModalities(new Set());
+                      setSelectedOutputModalities(new Set());
+                      setShowPtbOnly(false);
+                      setSearchQuery("");
+                    }}
+                    className={`px-3 text-sm text-muted-foreground hover:text-foreground transition-all flex items-center gap-2 ${isFiltered
+                        ? "opacity-100 pointer-events-auto"
+                        : "opacity-0 pointer-events-none"
+                      }`}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Reset filters
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    );
-  }
 
-  return (
-    <TooltipProvider>
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
-        <div className="max-w-7xl mx-auto px-4 py-12">
-          {/* Clean Header */}
-          <div className="mb-10">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="p-2 bg-black dark:bg-white rounded-lg">
-                <Cpu className="h-5 w-5 text-white dark:text-black" />
-              </div>
-              <h1 className="text-3xl font-semibold text-gray-900 dark:text-gray-100">
-                Model Registry
-              </h1>
-            </div>
-            <p className="text-gray-600 dark:text-gray-400">
-              Compare {models.length} language models across {allProviders.length} providers
-            </p>
-          </div>
+        {/* Models Table */}
+        <div className="bg-white dark:bg-gray-900">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              {filteredModels.map((model, index) => {
+                const minInputCost = Math.min(
+                  ...model.endpoints.map((e) => e.pricing.prompt)
+                );
+                const minOutputCost = Math.min(
+                  ...model.endpoints.map((e) => e.pricing.completion)
+                );
+                const isFree = minInputCost === 0;
 
-          {/* Enhanced Filters */}
-          <div className="mb-6 space-y-4">
-            {/* Search and main filters */}
-            <div className="flex flex-col sm:flex-row gap-3">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-                <Input
-                  placeholder="Search models, providers, or capabilities..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 h-10 bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700"
-                />
-              </div>
-              
-              <Select value={selectedProvider} onValueChange={setSelectedProvider}>
-                <SelectTrigger className="w-full sm:w-[140px] h-10 bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700">
-                  <SelectValue placeholder="Provider" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Providers</SelectItem>
-                  {allProviders.map((provider) => (
-                    <SelectItem key={provider} value={provider}>
-                      {provider}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                const currentParams = searchParams.toString();
+                const modelUrl = `/model/${encodeURIComponent(model.id)}${currentParams ? `?${currentParams}` : ""}`;
 
-              <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortOption)}>
-                <SelectTrigger className="w-full sm:w-[160px] h-10 bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700">
-                  <ArrowUpDown className="h-4 w-4 mr-2" />
-                  <SelectValue placeholder="Sort" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="name">Name</SelectItem>
-                  <SelectItem value="value">Best Value</SelectItem>
-                  <SelectItem value="price-low">Price: Low to High</SelectItem>
-                  <SelectItem value="price-high">Price: High to Low</SelectItem>
-                  <SelectItem value="context">Context Size</SelectItem>
-                  <SelectItem value="speed">Speed</SelectItem>
-                  <SelectItem value="newest">Newest First</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Additional filters */}
-            <div className="flex flex-wrap gap-4">
-              {/* Context size filter */}
-              <Select value={contextFilter} onValueChange={(v) => setContextFilter(v as ContextFilter)}>
-                <SelectTrigger className="w-[150px] h-9 bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700">
-                  <SelectValue placeholder="Context Size" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Sizes</SelectItem>
-                  <SelectItem value="small">≤32K</SelectItem>
-                  <SelectItem value="medium">32K-128K</SelectItem>
-                  <SelectItem value="large">128K-200K</SelectItem>
-                  <SelectItem value="xlarge">200K+</SelectItem>
-                </SelectContent>
-              </Select>
-
-              {/* Price filter */}
-              <Select value={priceFilter} onValueChange={(v) => setPriceFilter(v as PriceFilter)}>
-                <SelectTrigger className="w-[150px] h-9 bg-white dark:bg-gray-900 border-gray-300 dark:border-gray-700">
-                  <SelectValue placeholder="Price Range" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Prices</SelectItem>
-                  <SelectItem value="free">Free</SelectItem>
-                  <SelectItem value="cheap">Under $0.5/M</SelectItem>
-                  <SelectItem value="moderate">$0.5-$5/M</SelectItem>
-                  <SelectItem value="expensive">Over $5/M</SelectItem>
-                </SelectContent>
-              </Select>
-
-              {/* Capability checkboxes */}
-              <div className="flex flex-wrap gap-3">
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <Checkbox 
-                    checked={capabilityFilters.vision}
-                    onCheckedChange={(checked) => 
-                      setCapabilityFilters(prev => ({ ...prev, vision: checked as boolean }))}
-                  />
-                  <Eye className="h-3.5 w-3.5" />
-                  <span className="text-sm">Vision</span>
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <Checkbox 
-                    checked={capabilityFilters.functionCalling}
-                    onCheckedChange={(checked) => 
-                      setCapabilityFilters(prev => ({ ...prev, functionCalling: checked as boolean }))}
-                  />
-                  <Code className="h-3.5 w-3.5" />
-                  <span className="text-sm">Functions</span>
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <Checkbox 
-                    checked={capabilityFilters.jsonMode}
-                    onCheckedChange={(checked) => 
-                      setCapabilityFilters(prev => ({ ...prev, jsonMode: checked as boolean }))}
-                  />
-                  <FileJson className="h-3.5 w-3.5" />
-                  <span className="text-sm">JSON</span>
-                </label>
-              </div>
-            </div>
-          </div>
-
-          {/* Results count */}
-          <div className="mb-3 text-sm text-gray-500 dark:text-gray-400">
-            Showing {processedModels.length} of {models.length} models
-          </div>
-
-          {/* Enhanced Table */}
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-sm border border-gray-200 dark:border-gray-800 overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50">
-                    <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Model
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Capabilities
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Speed / Quality
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Context
-                    </th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Price / Million
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Providers
-                    </th>
-                    <th className="w-10"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 dark:divide-gray-800">
-                  {processedModels.map((model) => {
-                    const minInputCost = Math.min(...model.endpoints.map(e => e.pricing.prompt));
-                    const minOutputCost = Math.min(...model.endpoints.map(e => e.pricing.completion));
-                    const avgCost = (minInputCost + minOutputCost) / 2;
-                    const isFree = minInputCost === 0;
-                    const isNew = model.name.includes('3.7') || model.name.includes('2.0') || model.name.includes('3.3');
-                    const cheapestProvider = model.endpoints.reduce((min, ep) => 
-                      (ep.pricing.prompt + ep.pricing.completion) / 2 < (min.pricing.prompt + min.pricing.completion) / 2 ? ep : min
-                    );
-                    
-                    return (
-                      <tr 
-                        key={model.id}
-                        className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors group"
-                      >
-                        <td className="px-6 py-4">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium text-gray-900 dark:text-gray-100">
-                                {model.name}
-                              </span>
-                              {isFree && (
-                                <Badge className="text-xs bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300 border-0">
-                                  Free
-                                </Badge>
-                              )}
-                              {isNew && !isFree && (
-                                <Badge className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300 border-0">
-                                  New
-                                </Badge>
-                              )}
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Info className="h-3.5 w-3.5 text-gray-400 cursor-help" />
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  <div className="text-sm">
-                                    <p className="font-medium mb-1">{model.name}</p>
-                                    <p className="text-gray-600">{model.description}</p>
-                                    <p className="text-xs text-gray-500 mt-1">Training data: {model.trainingDate}</p>
-                                    <p className="text-xs text-gray-500">Max output: {model.maxOutput?.toLocaleString()} tokens</p>
-                                  </div>
-                                </TooltipContent>
-                              </Tooltip>
-                            </div>
-                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                              {model.author.charAt(0).toUpperCase() + model.author.slice(1).replace(/-/g, ' ')}
-                            </div>
-                          </div>
-                        </td>
-                        
-                        <td className="px-4 py-4">
-                          <div className="flex gap-1.5">
-                            {model.capabilities?.vision && (
-                              <Tooltip>
-                                <TooltipTrigger>
-                                  <Eye className="h-4 w-4 text-gray-600 dark:text-gray-400" />
-                                </TooltipTrigger>
-                                <TooltipContent>Vision capable</TooltipContent>
-                              </Tooltip>
+                return (
+                  <tbody key={model.id} className="group relative">
+                    {/* Invisible link overlay for proper link behavior */}
+                    <Link
+                      href={modelUrl}
+                      className="absolute inset-0 pointer-events-auto"
+                      aria-label={`View ${model.name}`}
+                    />
+                    <tr className="border-t-4 border-transparent cursor-pointer group-hover:bg-gray-50 dark:group-hover:bg-gray-800/50 pointer-events-none">
+                      <td className="px-4 lg:px-6 pt-6 pb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg font-normal text-gray-900 dark:text-gray-100">
+                            {model.name.replace(
+                              new RegExp(`^${model.author}:\\s*`, "i"),
+                              ""
                             )}
-                            {model.capabilities?.functionCalling && (
-                              <Tooltip>
-                                <TooltipTrigger>
-                                  <Code className="h-4 w-4 text-gray-600 dark:text-gray-400" />
-                                </TooltipTrigger>
-                                <TooltipContent>Function calling</TooltipContent>
-                              </Tooltip>
-                            )}
-                            {model.capabilities?.jsonMode && (
-                              <Tooltip>
-                                <TooltipTrigger>
-                                  <FileJson className="h-4 w-4 text-gray-600 dark:text-gray-400" />
-                                </TooltipTrigger>
-                                <TooltipContent>JSON mode</TooltipContent>
-                              </Tooltip>
-                            )}
-                          </div>
-                        </td>
-
-                        <td className="px-4 py-4">
-                          <div className="flex items-center gap-3">
-                            <div className="flex items-center gap-1">
-                              <Gauge className="h-3.5 w-3.5 text-gray-400" />
-                              <span className={`text-xs font-medium ${
-                                model.speed === 'fast' ? 'text-green-600 dark:text-green-400' :
-                                model.speed === 'slow' ? 'text-orange-600 dark:text-orange-400' :
-                                'text-gray-600 dark:text-gray-400'
-                              }`}>
-                                {model.speed === 'fast' ? 'Fast' : model.speed === 'slow' ? 'Slow' : 'Medium'}
-                              </span>
-                            </div>
-                            <div className="text-xs text-gray-600 dark:text-gray-400">
-                              {model.quality === 'high' ? '⭐⭐⭐' : model.quality === 'medium' ? '⭐⭐' : '⭐'}
-                            </div>
-                          </div>
-                        </td>
-                        
-                        <td className="px-4 py-4">
-                          <span className="text-sm font-mono text-gray-700 dark:text-gray-300">
-                            {formatContext(model.contextLength)}
                           </span>
-                        </td>
-                        
-                        <td className="px-4 py-4 text-right">
-                          <div>
-                            <div className={`text-sm font-mono font-medium ${
-                              isFree ? 'text-green-600 dark:text-green-400' : 'text-gray-900 dark:text-gray-100'
-                            }`}>
-                              {formatCost(avgCost)}
+                          <CopyButton
+                            textToCopy={model.id}
+                            tooltipContent={`Copy: ${model.id}`}
+                            iconSize={14}
+                            className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 pointer-events-auto"
+                          />
+                          {model.pinnedVersionOfModel && (
+                            <span className="text-xs font-normal text-amber-800 dark:text-amber-200 bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5">
+                              Pinned Version
+                            </span>
+                          )}
+                          {isFree && (
+                            <span className="text-xs font-normal text-green-800 dark:text-green-200 bg-green-100 dark:bg-green-900/40 px-2 py-0.5">
+                              Free
+                            </span>
+                          )}
+                          {model.endpoints.some((ep) => ep.supportsPtb) && (
+                            <span className="text-xs font-normal text-blue-800 dark:text-blue-200 bg-blue-100 dark:bg-blue-900/40 px-2 py-0.5">
+                              Credits
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+
+                    <tr className="pointer-events-none">
+                      <td className="px-4 lg:px-6 pt-1 pb-6">
+                        <div className="space-y-2">
+                          {model.description && (
+                            <div className="text-base font-light text-gray-400 dark:text-gray-500">
+                              {model.description.length > 150
+                                ? `${model.description.slice(0, 150)}...`
+                                : model.description}
                             </div>
-                            <div className="text-xs text-gray-500 dark:text-gray-400">
-                              in: {formatCost(minInputCost)}
+                          )}
+                          <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-sm font-light text-gray-400 dark:text-gray-500">
+                            <div>by {model.author}</div>
+                            <div className="hidden sm:block">•</div>
+                            <div>
+                              {formatContext(model.contextLength)} context
                             </div>
-                          </div>
-                        </td>
-                        
-                        <td className="px-4 py-4">
-                          <div className="space-y-1">
+                            <div className="hidden sm:block">•</div>
                             <div className="flex flex-wrap gap-1">
-                              {model.endpoints.slice(0, 2).map((endpoint, idx) => (
-                                <span 
-                                  key={idx}
-                                  className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${
-                                    endpoint === cheapestProvider 
-                                      ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
-                                      : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
-                                  }`}
-                                >
-                                  {endpoint.provider}
-                                </span>
-                              ))}
-                              {model.endpoints.length > 2 && (
-                                <Tooltip>
-                                  <TooltipTrigger>
-                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300">
-                                      +{model.endpoints.length - 2}
-                                    </span>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    <div className="text-xs">
-                                      {model.endpoints.slice(2).map(ep => ep.provider).join(', ')}
-                                    </div>
-                                  </TooltipContent>
-                                </Tooltip>
-                              )}
+                              <span>
+                                $
+                                {minInputCost < 1
+                                  ? minInputCost.toFixed(2)
+                                  : minInputCost.toFixed(1)}
+                                /M in
+                              </span>
+                              <span className="hidden sm:inline">,</span>
+                              <span>
+                                $
+                                {minOutputCost < 1
+                                  ? minOutputCost.toFixed(2)
+                                  : minOutputCost.toFixed(1)}
+                                /M out
+                              </span>
                             </div>
                           </div>
-                        </td>
-                        
-                        <td className="px-4">
-                          <button
-                            onClick={() => copyModelId(model.id)}
-                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"
-                          >
-                            {copiedModel === model.id ? (
-                              <Check className="h-4 w-4 text-green-600" />
-                            ) : (
-                              <Copy className="h-4 w-4 text-gray-400" />
-                            )}
-                          </button>
+                        </div>
+                      </td>
+                    </tr>
+
+                    {index < filteredModels.length - 1 && (
+                      <tr>
+                        <td className="px-6 py-2">
+                          <div className="border-b border-gray-100 dark:border-gray-800/50 mx-12"></div>
                         </td>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {processedModels.length === 0 && (
-            <div className="text-center py-12">
-              <p className="text-gray-500 dark:text-gray-400">
-                No models found matching your criteria
-              </p>
-            </div>
-          )}
-
-          {/* Simple Footer */}
-          <div className="mt-8 text-center">
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              Prices shown are blended average per million tokens. Green highlight indicates cheapest provider.
-            </p>
+                    )}
+                  </tbody>
+                );
+              })}
+            </table>
           </div>
         </div>
+
+        {filteredModels.length === 0 && !loading && (
+          <div className="text-center py-12">
+            <p className="text-gray-500 dark:text-gray-400">
+              No models found matching your criteria
+            </p>
+          </div>
+        )}
+
+        {loading && (
+          <div className="space-y-4 p-6">
+            {[...Array(5)].map((_, i) => (
+              <div key={i} className="animate-pulse">
+                <div className="flex items-start space-x-4">
+                  <div className="flex-1">
+                    <div className="h-5 bg-gray-200 dark:bg-gray-700 w-1/3 mb-2"></div>
+                    <div className="h-4 bg-gray-200 dark:bg-gray-700 w-2/3"></div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-    </TooltipProvider>
+
+      {/* Request Model Modal */}
+      <RequestModelModal
+        open={requestModalOpen}
+        onOpenChange={setRequestModalOpen}
+      />
+    </div>
   );
 }

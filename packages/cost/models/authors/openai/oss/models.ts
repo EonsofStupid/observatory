@@ -2,25 +2,25 @@ import { ModelConfig } from "../../../types";
 
 export const models = {
   "gpt-oss-120b": {
-    name: "OpenAI: gpt-oss-120b",
+    name: "OpenAI GPT-OSS 120b",
     author: "openai",
     description:
-      "gpt-oss-120b is OpenAI's most powerful open-weight model, which fits into a single H100 GPU (117B parameters with 5.1B active parameters).",
-    contextLength: 131000,
-    maxOutputTokens: 131000,
-    created: "2025-08-05T10:17:11",
-    modality: "text->text",
+      "gpt-oss-120b is our most powerful open-weight model, which fits into a single H100 GPU (117B parameters with 5.1B active parameters). Features permissive Apache 2.0 license, configurable reasoning effort (low, medium, high), full chain-of-thought access, fine-tunable parameters, and agentic capabilities including function calling, web browsing, Python code execution, and structured outputs.",
+    contextLength: 131072,
+    maxOutputTokens: 131072,
+    created: "2024-06-01T00:00:00.000Z",
+    modality: { inputs: ["text"], outputs: ["text"] },
     tokenizer: "GPT",
   },
   "gpt-oss-20b": {
-    name: "OpenAI: gpt-oss-20b",
+    name: "OpenAI GPT-OSS 20b",
     author: "openai",
     description:
-      "gpt-oss-20b is OpenAI's medium-sized open-weight model for low latency, local, or specialized use-cases (21B parameters with 3.6B active parameters).",
-    contextLength: 131000,
-    maxOutputTokens: 131000,
-    created: "2025-08-05T10:17:09",
-    modality: "text->text",
+      "gpt-oss-20b is our medium-sized open-weight model for low latency, local, or specialized use-cases (21B parameters with 3.6B active parameters). Features permissive Apache 2.0 license, configurable reasoning effort (low, medium, high), full chain-of-thought access, fine-tunable parameters, and agentic capabilities including function calling, web browsing, Python code execution, and structured outputs.",
+    contextLength: 131072,
+    maxOutputTokens: 131072,
+    created: "2024-06-01T00:00:00.000Z",
+    modality: { inputs: ["text"], outputs: ["text"] },
     tokenizer: "GPT",
   },
 } satisfies Record<string, ModelConfig>;

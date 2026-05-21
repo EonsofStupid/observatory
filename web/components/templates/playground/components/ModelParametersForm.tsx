@@ -34,13 +34,10 @@ import {
   DialogTitle,
   DialogHeader,
 } from "@/components/ui/dialog";
-import { DialogTrigger } from "@/components/ui/dialog";
 import { Dialog } from "@/components/ui/dialog";
 import { providers } from "@/data/providers";
 import { ProviderCard } from "@/components/providers/ProviderCard";
-import Image from "next/image";
 import { ModelParameters } from "@/lib/api/llm/generate";
-import { useOrg } from "@/components/layout/org/organizationContext";
 import { ResponseFormat, ResponseFormatType } from "../types";
 
 interface ModelParametersFormProps {
@@ -49,8 +46,6 @@ interface ModelParametersFormProps {
   onParametersChange: (_parameters: ModelParameters) => void;
   responseFormat: ResponseFormat;
   onResponseFormatChange: (_responseFormat: ResponseFormat) => void;
-  useAIGateway: boolean;
-  setUseAIGateway: (_useAIGateway: boolean) => void;
   error: string | null;
 }
 
@@ -69,12 +64,8 @@ export default function ModelParametersForm({
   onParametersChange,
   responseFormat,
   onResponseFormatChange,
-  useAIGateway,
-  setUseAIGateway,
   error,
 }: ModelParametersFormProps) {
-  const organization = useOrg();
-
   const updateParameter = (key: keyof ModelParameters, value: any) => {
     onParametersChange({
       ...parameters,
@@ -145,30 +136,24 @@ export default function ModelParametersForm({
     },
   });
 
-  const [isOpenRouterDialogOpen, setIsOpenRouterDialogOpen] = useState(false);
+  const [isProviderKeyDialogOpen, setIsProviderKeyDialogOpen] = useState(false);
 
-  // Auto-open OpenRouter dialog when the specific error occurs
+  // Auto-open provider key dialog when rate limit error occurs
   useEffect(() => {
     logger.error({ error }, "Error occurred");
     if (
       error &&
-      error.includes(
-        "You have reached your free playground limit. Please add your own OpenRouter key to continue using the Playground.",
-      )
+      (error.includes("Insufficient credits") ||
+        (error.includes("No") && error.includes("API key found")))
     ) {
-      setIsOpenRouterDialogOpen(true);
+      setIsProviderKeyDialogOpen(true);
     }
   }, [error]);
 
   return (
     <>
       <Popover
-        open={
-          isModelParametersPopoverOpen ||
-          error?.includes(
-            "You have reached your free playground limit. Please add your own OpenRouter key to continue using the Playground.",
-          )
-        }
+        open={isModelParametersPopoverOpen}
         onOpenChange={setIsModelParametersPopoverOpen}
       >
         <PopoverTrigger asChild>
@@ -596,25 +581,9 @@ export default function ModelParametersForm({
               </Select>
             </div> */}
             <Dialog
-              open={isOpenRouterDialogOpen}
-              onOpenChange={setIsOpenRouterDialogOpen}
+              open={isProviderKeyDialogOpen}
+              onOpenChange={setIsProviderKeyDialogOpen}
             >
-              <DialogTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="flex items-center gap-2"
-                >
-                  <Image
-                    src="/assets/home/providers/openrouter.jpg"
-                    alt="OpenRouter"
-                    className="h-4 w-4 rounded-sm"
-                    width={16}
-                    height={16}
-                  />
-                  Configure OpenRouter
-                </Button>
-              </DialogTrigger>
               <DialogContent className="sm:max-w-xl">
                 <DialogHeader>
                   <DialogTitle>Configure OpenRouter</DialogTitle>

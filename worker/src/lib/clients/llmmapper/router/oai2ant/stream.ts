@@ -1,79 +1,83 @@
-import { toOpenAI } from "../../providers/anthropic/streamedResponse/toOpenai";
-import { toAnthropic } from "../../providers/openai/request/toAnthropic";
-import { OpenAIRequestBody } from "../../providers/openai/request/types";
+import { AnthropicToOpenAIStreamConverter } from "@helicone-package/llm-mapper/transform/providers/anthropic/streamedResponse/toOpenai";
+import { toAnthropic } from "@helicone-package/llm-mapper/transform/providers/openai/request/toAnthropic";
+import { HeliconeChatCreateParams } from "@helicone-package/prompts/types";
+import { EventStreamCodec } from "@smithy/eventstream-codec";
+import { fromUtf8, toUtf8 } from "@smithy/util-utf8";
 
-const ENDING_MESSAGE = `data: {"id":"chatcmpl-A4kEtQWA8g4OlOYtKaDdBKLWdhrBx","object":"chat.completion.chunk","created":1725694419,"model":"gpt-4o-2024-05-13","system_fingerprint":"fp_25624ae3a5","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}]}
-data: [DONE]
-`;
-
-export function oaiStream2antStream(
-  stream: ReadableStream<Uint8Array>
+// transform the readable stream from Anthropic SSE or Bedrock Event Stream to OpenAI SSE format
+export function ant2oaiStream(
+  stream: ReadableStream<Uint8Array>,
+  sourceContentType?: string
 ): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const converter = new AnthropicToOpenAIStreamConverter();
+
+  const isBedrockEventStream =
+    sourceContentType?.includes("application/vnd.amazon.eventstream") ?? false;
+
   return new ReadableStream({
-    start(controller) {
-      let currentMessage = "";
+    async start(controller) {
+      const reader = stream.getReader();
 
-      stream
-        .pipeThrough(new TextDecoderStream())
-        .pipeThrough(
-          new TransformStream({
-            transform(chunk) {
-              currentMessage += chunk;
-              const messages = currentMessage.split("\n\n");
+      try {
+        if (isBedrockEventStream) {
+          await readBedrockEventStream(reader, controller, encoder, converter, decoder);
+        } else {
+          await readAnthropicSSE(reader, controller, encoder, converter, decoder);
+        }
 
-              if (messages.length > 1) {
-                const firstChunks = messages.slice(0, -1);
-                const lastChunk = messages[messages.length - 1];
-                for (const line of firstChunks.join("\n\n").split("\n")) {
-                  if (line.trim().startsWith("data: ")) {
-                    console.log("line", line);
-                    const jsonData = toOpenAI(JSON.parse(line.slice(6)));
-                    if (jsonData) {
-                      controller.enqueue(
-                        `data: ${JSON.stringify(jsonData).trim()}\n\n`
-                      );
-                    }
-                  }
-                }
-                currentMessage = lastChunk;
-              }
-            },
-            flush() {
-              for (const line of currentMessage.split("\n")) {
-                if (line.trim().startsWith("data: ")) {
-                  const jsonData = toOpenAI(JSON.parse(line.slice(6)));
-                  if (jsonData) {
-                    controller.enqueue(
-                      `data: ${JSON.stringify(jsonData).trim()}\n\n`
-                    );
-                  }
-                }
-              }
-              for (const line of ENDING_MESSAGE.split("\n")) {
-                controller.enqueue(line + "\n\n");
-              }
-            },
-          })
-        )
-        .getReader()
-        .read();
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      } finally {
+        reader.releaseLock();
+      }
     },
-  })
-    .pipeThrough(
-      new TransformStream({
-        transform(chunk, controller) {
-          controller.enqueue(chunk);
-        },
-      })
-    )
-    .pipeThrough(new TextEncoderStream());
+  });
 }
 
-export async function oaiStream2antStreamResponse({
+function processBuffer(
+  buffer: string,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  converter: AnthropicToOpenAIStreamConverter
+) {
+  converter.processLines(buffer, (chunk) => {
+    const sseMessage = `data: ${JSON.stringify(chunk)}\n\n`;
+    controller.enqueue(encoder.encode(sseMessage));
+  });
+}
+
+// Anthro SSE Response to OpenAI SSE Response
+export function ant2oaiStreamResponse(response: Response): Response {
+  if (!response.body) {
+    return response;
+  }
+
+  const originalContentType = response.headers.get("content-type") ?? undefined;
+  const transformedStream = ant2oaiStream(response.body, originalContentType);
+  const headers = new Headers(response.headers);
+
+  // change headers to match OpenAI SSE format
+  headers.set("content-type", "text/event-stream; charset=utf-8");
+  headers.set("cache-control", "no-cache");
+  headers.set("connection", "keep-alive");
+  headers.delete("content-length");
+
+  return new Response(transformedStream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+export async function antStream2oaiStream({
   body,
   headers,
 }: {
-  body: OpenAIRequestBody;
+  body: HeliconeChatCreateParams;
   headers: Headers;
 }): Promise<Response> {
   const anthropicBody = toAnthropic(body);
@@ -110,23 +114,172 @@ export async function oaiStream2antStreamResponse({
       return new Response("No response body", { status: 500 });
     }
 
-    const stream = oaiStream2antStream(response.body);
-
-    return new Response(stream, {
-      headers: {
-        // ...response.headers,
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache",
-        connection: "keep-alive",
-        "Transfer-Encoding": "chunked",
-        "Content-Length": "",
-      },
-    });
+    return ant2oaiStreamResponse(response);
   } catch (error) {
-    console.error("Error in oaiStream2antStreamResponse:", error);
+    console.error("Error in oaiStream2antStream:", error);
     return new Response(
       `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-      { status: 500 }
+      {
+        status: 500,
+      }
     );
   }
+}
+
+// 4 bytes length, 4 bytes header, 4 prelude CRC, 4 CRC
+const MINIMUM_EVENT_STREAM_MESSAGE_LENGTH = 16;
+
+async function readAnthropicSSE(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  converter: AnthropicToOpenAIStreamConverter,
+  decoder: TextDecoder
+): Promise<void> {
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        processBuffer(`${buffer}\n\n`, controller, encoder, converter);
+      }
+      break;
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const messages = buffer.split("\n\n");
+    buffer = messages.pop() ?? "";
+
+    for (const message of messages) {
+      if (message.trim()) {
+        processBuffer(`${message}\n\n`, controller, encoder, converter);
+      }
+    }
+  }
+}
+
+async function readBedrockEventStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  converter: AnthropicToOpenAIStreamConverter,
+  decoder: TextDecoder
+): Promise<void> {
+  const codec = new EventStreamCodec(toUtf8, fromUtf8);
+  let buffer = new Uint8Array(0);
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    if (!value || value.byteLength === 0) {
+      continue;
+    }
+
+    if (buffer.byteLength === 0) {
+      const initial = new Uint8Array(value.byteLength);
+      initial.set(value);
+      buffer = initial;
+    } else {
+      const next = new Uint8Array(buffer.byteLength + value.byteLength);
+      next.set(buffer, 0);
+      next.set(value, buffer.byteLength);
+      buffer = next;
+    }
+
+    while (buffer.byteLength >= MINIMUM_EVENT_STREAM_MESSAGE_LENGTH) {
+      const view = new DataView(
+        buffer.buffer,
+        buffer.byteOffset,
+        buffer.byteLength
+      );
+      const messageLength = view.getUint32(0, false);
+
+      if (messageLength < MINIMUM_EVENT_STREAM_MESSAGE_LENGTH) {
+        throw new Error(
+          `Invalid Bedrock event stream message length: ${messageLength}`
+        );
+      }
+
+      if (buffer.byteLength < messageLength) {
+        break;
+      }
+
+      const messageBytes = buffer.slice(0, messageLength);
+      buffer = buffer.slice(messageLength);
+
+      const { headers, body } = codec.decode(messageBytes);
+      const eventTypeHeader = headers[":event-type"];
+      const eventType =
+        eventTypeHeader && eventTypeHeader.type === "string"
+          ? eventTypeHeader.value
+          : undefined;
+
+      if (eventType === "error") {
+        const errorPayload = decoder.decode(body);
+        throw new Error(
+          `Bedrock streaming error${
+            errorPayload ? `: ${errorPayload}` : ""
+          }`.trim()
+        );
+      }
+
+      if (eventType !== "chunk") {
+        continue;
+      }
+
+      if (!body.byteLength) {
+        continue;
+      }
+
+      let payload: { bytes?: string } | null = null;
+
+      try {
+        payload = JSON.parse(decoder.decode(body));
+      } catch (error) {
+        console.error("Failed to parse Bedrock chunk payload:", error);
+        continue;
+      }
+
+      if (!payload?.bytes) {
+        continue;
+      }
+
+      const decodedChunk = decodeBase64ToString(payload.bytes);
+      processBuffer(`data: ${decodedChunk}\n\n`, controller, encoder, converter);
+    }
+  }
+
+  if (buffer.byteLength > 0) {
+    throw new Error("Incomplete Bedrock event stream message received.");
+  }
+}
+
+function decodeBase64ToString(base64: string): string {
+  if (typeof atob === "function") {
+    const binary = atob(base64);
+    const length = binary.length;
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  }
+
+  const bufferCtor = (globalThis as { Buffer?: any }).Buffer;
+  if (bufferCtor) {
+    return bufferCtor.from(base64, "base64").toString("utf-8");
+  }
+
+  throw new Error("Unable to decode base64 payload in current environment.");
 }

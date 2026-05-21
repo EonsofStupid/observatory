@@ -1,8 +1,7 @@
-import { CheckIcon, ChevronDownIcon } from "@heroicons/react/20/solid";
+import { CheckIcon } from "@heroicons/react/20/solid";
 import Link from "next/link";
 import {
   StickyTable,
-  Table,
   TableBody,
   TableCell,
   TableHead,
@@ -10,7 +9,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { useState, Fragment } from "react";
+import { Fragment } from "react";
 
 interface PricingTier {
   name: string;
@@ -25,23 +24,12 @@ interface Feature {
   pro: string | boolean;
   team: string | boolean;
   enterprise: string | boolean;
-  tooltip?: "usage";
 }
 
 interface FeatureGroup {
   title: string;
   features: Feature[];
 }
-
-const USAGE_PRICING_TIERS = [
-  { min: 0, max: 10_000, rate: 0.0 },
-  { min: 10_000, max: 25_000, rate: 0.0016 },
-  { min: 25_000, max: 50_000, rate: 0.0008 },
-  { min: 50_000, max: 100_000, rate: 0.00035 },
-  { min: 100_000, max: 2_000_000, rate: 0.0003 },
-  { min: 2_000_000, max: 15_000_000, rate: 0.000128 },
-  { min: 15_000_000, max: Infinity, rate: 0.000083 },
-];
 
 const tiers: PricingTier[] = [
   {
@@ -74,12 +62,12 @@ const featureGroups: FeatureGroup[] = [
       {
         name: "Seats",
         hobby: "1",
-        pro: "$20/seat/mo",
+        pro: "Unlimited",
         team: "Unlimited",
         enterprise: "Unlimited",
       },
       {
-        name: "Organization",
+        name: "Organizations",
         hobby: "1",
         pro: "1",
         team: "5",
@@ -91,58 +79,50 @@ const featureGroups: FeatureGroup[] = [
     title: "Monitoring",
     features: [
       {
-        name: "Logs",
-        hobby: "10,000 logs/mo",
-        pro: "10,000 logs/mo",
-        team: "10,000 logs/mo",
-        enterprise: "Unlimited",
-      },
-      {
-        name: "Additional logs",
-        hobby: false,
-        pro: "Usage-based",
-        team: "Usage-based",
-        enterprise: "Volume discount",
-        tooltip: "usage",
-      },
-      {
-        name: "Multi-modal",
-        hobby: true,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
-      {
-        name: "Metrics dashboard",
-        hobby: true,
-        pro: true,
-        team: true,
-        enterprise: true,
+        name: "Requests",
+        hobby: "10,000/mo",
+        pro: "10K free",
+        team: "10K free",
+        enterprise: "10K free",
       },
       {
         name: "Sessions",
-        hobby: "1",
+        hobby: true,
         pro: true,
         team: true,
         enterprise: true,
       },
       {
         name: "User analytics",
-        hobby: "3 users",
+        hobby: true,
         pro: true,
         team: true,
         enterprise: true,
       },
       {
         name: "Custom properties",
-        hobby: "1",
+        hobby: true,
+        pro: true,
+        team: true,
+        enterprise: true,
+      },
+      {
+        name: "HQL (Query Language)",
+        hobby: false,
         pro: true,
         team: true,
         enterprise: true,
       },
       {
         name: "Alerts",
-        hobby: "1",
+        hobby: false,
+        pro: true,
+        team: true,
+        enterprise: true,
+      },
+      {
+        name: "Reports",
+        hobby: false,
         pro: true,
         team: true,
         enterprise: true,
@@ -154,46 +134,13 @@ const featureGroups: FeatureGroup[] = [
     features: [
       {
         name: "Playground",
-        hobby: "10 runs",
+        hobby: true,
         pro: true,
         team: true,
         enterprise: true,
       },
       {
-        name: "Prompt management",
-        hobby: "3 prompts",
-        pro: "Unlimited with $50/mo add-on",
-        team: "Unlimited",
-        enterprise: true,
-      },
-      {
-        name: "• Collaborative workspace",
-        hobby: false,
-        pro: "Included",
-        team: "Included",
-        enterprise: true,
-      },
-      {
-        name: "• Version history",
-        hobby: "3 versions",
-        pro: "Included",
-        team: "Included",
-        enterprise: true,
-      },
-    ],
-  },
-  {
-    title: "Evaluations",
-    features: [
-      {
-        name: "Human annotation queue",
-        hobby: "coming soon...",
-        pro: "coming soon...",
-        team: "coming soon...",
-        enterprise: "coming soon...",
-      },
-      {
-        name: "User feedback",
+        name: "Prompts",
         hobby: true,
         pro: true,
         team: true,
@@ -208,14 +155,14 @@ const featureGroups: FeatureGroup[] = [
       },
       {
         name: "Datasets",
-        hobby: "1",
+        hobby: true,
         pro: true,
         team: true,
         enterprise: true,
       },
       {
         name: "Webhooks",
-        hobby: "1",
+        hobby: false,
         pro: true,
         team: true,
         enterprise: true,
@@ -225,13 +172,6 @@ const featureGroups: FeatureGroup[] = [
   {
     title: "Gateway",
     features: [
-      {
-        name: "One-line integration",
-        hobby: true,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
       {
         name: "Caching",
         hobby: true,
@@ -247,29 +187,8 @@ const featureGroups: FeatureGroup[] = [
         enterprise: true,
       },
       {
-        name: "LLM guardrails",
-        hobby: false,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
-      {
-        name: "LLM moderation",
-        hobby: false,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
-      {
-        name: "Gateway fallbacks",
-        hobby: false,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
-      {
-        name: "Retries",
-        hobby: false,
+        name: "Automatic fallbacks",
+        hobby: true,
         pro: true,
         team: true,
         enterprise: true,
@@ -281,29 +200,43 @@ const featureGroups: FeatureGroup[] = [
     features: [
       {
         name: "Retention",
-        hobby: "1 month",
-        pro: "3 months",
+        hobby: "7 days",
+        pro: "1 month",
         team: "3 months",
         enterprise: "Forever",
       },
       {
+        name: "Storage",
+        hobby: "1 GB",
+        pro: "1 GB free",
+        team: "1 GB free",
+        enterprise: "1 GB free",
+      },
+      {
+        name: "Configurable retention",
+        hobby: false,
+        pro: false,
+        team: true,
+        enterprise: true,
+      },
+      {
         name: "Ingestion",
-        hobby: "1,200 logs/min",
-        pro: "6,000 logs/min",
+        hobby: "10 logs/min",
+        pro: "1,000 logs/min",
         team: "15,000 logs/min",
         enterprise: "30,000 logs/min",
       },
       {
         name: "API access",
         hobby: false,
-        pro: "60 calls/min",
+        pro: "10 calls/min",
         team: "60 calls/min",
         enterprise: "1,000 calls/min",
       },
       {
         name: "Data export",
-        hobby: true,
-        pro: true,
+        hobby: false,
+        pro: false,
         team: true,
         enterprise: true,
       },
@@ -337,53 +270,13 @@ const featureGroups: FeatureGroup[] = [
         name: "Dedicated support engineer",
         hobby: false,
         pro: false,
-        team: false,
+        team: true,
         enterprise: true,
       },
       {
         name: "SLAs",
         hobby: false,
         pro: false,
-        team: false,
-        enterprise: true,
-      },
-    ],
-  },
-  {
-    title: "Security",
-    features: [
-      {
-        name: "Data region",
-        hobby: "US/EU",
-        pro: "US/EU",
-        team: "US/EU",
-        enterprise: "US/EU",
-      },
-      {
-        name: "SAML SSO",
-        hobby: false,
-        pro: false,
-        team: false,
-        enterprise: true,
-      },
-      {
-        name: "Data encryption",
-        hobby: false,
-        pro: false,
-        team: false,
-        enterprise: "Optional",
-      },
-      {
-        name: "RBAC",
-        hobby: false,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
-      {
-        name: "Omit logs",
-        hobby: false,
-        pro: true,
         team: true,
         enterprise: true,
       },
@@ -392,13 +285,6 @@ const featureGroups: FeatureGroup[] = [
   {
     title: "Compliance",
     features: [
-      {
-        name: "GDPR",
-        hobby: false,
-        pro: true,
-        team: true,
-        enterprise: true,
-      },
       {
         name: "HIPAA",
         hobby: false,
@@ -411,6 +297,13 @@ const featureGroups: FeatureGroup[] = [
         hobby: false,
         pro: false,
         team: true,
+        enterprise: true,
+      },
+      {
+        name: "SAML SSO",
+        hobby: false,
+        pro: false,
+        team: false,
         enterprise: true,
       },
       {
@@ -427,20 +320,11 @@ const featureGroups: FeatureGroup[] = [
         team: false,
         enterprise: true,
       },
-      {
-        name: "Custom DPAs",
-        hobby: false,
-        pro: false,
-        team: false,
-        enterprise: true,
-      },
     ],
   },
 ];
 
 export default function PricingComparisonTable() {
-  const [showUsageTiers, setShowUsageTiers] = useState(false);
-
   return (
     <div className="flex flex-col gap-6">
       <h2 className="text-black text-4xl font-bold">Compare plans</h2>
@@ -512,59 +396,9 @@ export default function PricingComparisonTable() {
                           : ""
                       }`}
                     >
-                      <div className="flex flex-col">
-                        <div className="flex items-center gap-2">
-                          <span className="text-slate-500 text-sm font-medium">
-                            {feature.name}
-                          </span>
-                          {feature.tooltip === "usage" && (
-                            <button
-                              onClick={() => setShowUsageTiers(!showUsageTiers)}
-                              className="p-1 hover:bg-slate-100 rounded-full transition-colors"
-                            >
-                              <ChevronDownIcon
-                                className={`w-4 h-4 text-slate-400 transition-transform ${
-                                  showUsageTiers ? "rotate-180" : ""
-                                }`}
-                              />
-                            </button>
-                          )}
-                        </div>
-                        {feature.tooltip === "usage" && showUsageTiers && (
-                          <div className="pl-8 pt-4">
-                            <Table className="w-full">
-                              <TableHeader>
-                                <TableRow className="hover:bg-transparent">
-                                  <TableHead className="text-slate-500 font-medium px-0 py-1">
-                                    Logs per month
-                                  </TableHead>
-                                  <TableHead className="text-slate-500 font-medium px-0 py-1 text-right">
-                                    Rate per log
-                                  </TableHead>
-                                </TableRow>
-                              </TableHeader>
-                              <TableBody>
-                                {USAGE_PRICING_TIERS.map((tier, i) => (
-                                  <TableRow
-                                    key={i}
-                                    className="hover:bg-transparent"
-                                  >
-                                    <TableCell className="px-0 py-1 text-sm text-slate-500">
-                                      {tier.min.toLocaleString()} -{" "}
-                                      {tier.max === Infinity
-                                        ? "∞"
-                                        : tier.max.toLocaleString()}
-                                    </TableCell>
-                                    <TableCell className="px-0 py-1 text-right text-sm text-slate-500">
-                                      ${tier.rate.toFixed(5)}
-                                    </TableCell>
-                                  </TableRow>
-                                ))}
-                              </TableBody>
-                            </Table>
-                          </div>
-                        )}
-                      </div>
+                      <span className="text-slate-500 text-sm font-medium">
+                        {feature.name}
+                      </span>
                     </TableCell>
                     {[
                       feature.hobby,
@@ -583,9 +417,23 @@ export default function PricingComparisonTable() {
                         }`}
                       >
                         {typeof value === "string" ? (
-                          <div className="text-slate-500 text-sm font-medium">
-                            {value}
-                          </div>
+                          value.includes("free") ? (
+                            <div className="flex flex-col">
+                              <span className="text-slate-500 text-sm font-medium">
+                                {value}
+                              </span>
+                              <Link
+                                href="#calculator"
+                                className="text-brand text-xs hover:underline"
+                              >
+                                + usage-based ↑
+                              </Link>
+                            </div>
+                          ) : (
+                            <div className="text-slate-500 text-sm font-medium">
+                              {value}
+                            </div>
+                          )
                         ) : value === true ? (
                           <CheckIcon className="w-5 h-5 text-slate-500" />
                         ) : null}

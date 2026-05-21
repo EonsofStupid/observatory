@@ -17,11 +17,11 @@ import {
 } from "./lib/clients/kafkaConsumers/constant";
 import { webSocketProxyForwarder } from "./lib/proxy/WebSocketProxyForwarder";
 import { RequestWrapper } from "./lib/requestWrapper/requestWrapper";
-import { tokenRouter } from "./lib/routers/tokenRouter";
 import { DelayedOperationService } from "./lib/shared/delayedOperationService";
 import { runLoopsOnce, runMainLoops } from "./mainLoops";
 import { authFromRequest, authMiddleware } from "./middleware/auth";
 import { IS_RATE_LIMIT_ENABLED, limiter } from "./middleware/ratelimitter";
+import { unauthorizedCacheMiddleware } from "./middleware/unauthorizedCache";
 import { RegisterRoutes as registerPrivateTSOARoutes } from "./tsoa-build/private/routes";
 import { RegisterRoutes as registerPublicTSOARoutes } from "./tsoa-build/public/routes";
 import * as publicSwaggerDoc from "./tsoa-build/public/swagger.json";
@@ -33,16 +33,20 @@ import { toExpressRequest } from "./utils/expressHelpers";
 import { webSocketControlPlaneServer } from "./controlPlane/controlPlane";
 import { startDBListener } from "./controlPlane/dbListener";
 import { ValidateError } from "tsoa";
+import { SecretManager } from "@helicone-package/secrets/SecretManager";
 
 if (ENVIRONMENT === "production" || process.env.ENABLE_CRON_JOB === "true") {
   runMainLoops();
 }
 const getAppUrlRegex = () => {
-  const appUrl = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+  const appUrl =
+    process.env.APP_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    "http://localhost:3000";
   try {
     const url = new URL(appUrl);
     const protocol = url.protocol.replace(":", "");
-    const hostname = url.hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const hostname = url.hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const port = url.port ? `:${url.port}` : "";
     return new RegExp(`^${protocol}:\/\/${hostname}${port}$`);
   } catch {
@@ -53,19 +57,15 @@ const getAppUrlRegex = () => {
 const allowedOriginsEnv = {
   production: [
     /^https?:\/\/(www\.)?helicone\.ai$/,
-    /^https?:\/\/(www\.)?.*-helicone\.vercel\.app$/,
+    /^https?:\/\/helicone-[a-z0-9-]+-helicone\.vercel\.app$/,
     /^https?:\/\/(www\.)?helicone\.vercel\.app$/,
     /^https?:\/\/(www\.)?helicone-git-valhalla-use-jawn-to-read-helicone\.vercel\.app$/,
     getAppUrlRegex(),
     /^https?:\/\/(www\.)?eu\.helicone\.ai$/, // Added eu.helicone.ai
     /^https?:\/\/(www\.)?us\.helicone\.ai$/,
   ],
-  development: [
-    getAppUrlRegex(),
-  ],
-  preview: [
-    getAppUrlRegex(),
-  ],
+  development: [getAppUrlRegex()],
+  preview: [getAppUrlRegex()],
 };
 
 const allowedOrigins = allowedOriginsEnv[ENVIRONMENT];
@@ -113,22 +113,21 @@ var rawBodySaver = function (req: any, res: any, buf: any, encoding: any) {
   }
 };
 
-app.use(bodyParser.json({ verify: rawBodySaver, limit: "50mb" }));
+app.use(bodyParser.json({ verify: rawBodySaver, limit: "10mb" }));
 app.use(
   bodyParser.urlencoded({
     verify: rawBodySaver,
     extended: true,
-    limit: "50mb",
-    parameterLimit: 50000,
+    limit: "10mb",
+    parameterLimit: 1000,
   })
 );
-app.use(bodyParser.raw({ verify: rawBodySaver, type: "*/*", limit: "50mb" }));
+app.use(bodyParser.raw({ verify: rawBodySaver, type: "*/*", limit: "10mb" }));
 
-const KAFKA_CREDS = JSON.parse(process.env.KAFKA_CREDS ?? "{}");
-const KAFKA_ENABLED = (KAFKA_CREDS?.KAFKA_ENABLED ?? "false") === "true";
+const SQS_ENABLED = SecretManager.getSecret("SQS_ENABLED") === "true";
 
-if (KAFKA_ENABLED) {
-  console.log("Starting Kafka consumers");
+if (SQS_ENABLED) {
+  console.log("Starting SQS consumers");
   startConsumers({
     dlqCount: 0,
     normalCount: 0,
@@ -180,16 +179,14 @@ unAuthenticatedRouter.use(
   swaggerUi.setup(publicSwaggerDoc as any)
 );
 
-unAuthenticatedRouter.use(tokenRouter);
-
 unAuthenticatedRouter.use("/download/swagger.json", (req, res) => {
   res.json(publicSwaggerDoc as any);
 });
 
-// v1APIRouter.use(
-//   "/v1/public/dataisbeautiful",
-//   unauthorizedCacheMiddleware("/v1/public/dataisbeautiful")
-// );
+v1APIRouter.use(
+  "/v1/public/stats",
+  unauthorizedCacheMiddleware("stats", 4 * 60 * 60 * 1000)
+);
 
 v1APIRouter.use(authMiddleware);
 
@@ -213,6 +210,21 @@ registerPrivateTSOARoutes(v1APIRouter);
 app.use(unAuthenticatedRouter);
 app.use(v1APIRouter);
 
+// Helper to detect safe-to-expose ClickHouse/database errors
+function getSafeErrorMessage(err: Error): string | null {
+  const msg = err.message.toLowerCase();
+  if (msg.includes("max_execution_time") || msg.includes("timeout")) {
+    return "Query timeout. Try a shorter time range or simpler filters.";
+  }
+  if (msg.includes("max_memory_usage")) {
+    return "Query exceeded memory limit. Try a shorter time range.";
+  }
+  if (msg.includes("max_result_rows") || msg.includes("max_rows_to_read")) {
+    return "Query returned too many rows. Add more filters.";
+  }
+  return null;
+}
+
 function errorHandler(
   err: unknown,
   req: express.Request,
@@ -227,8 +239,13 @@ function errorHandler(
     });
   }
   if (err instanceof Error) {
+    const safeMessage = getSafeErrorMessage(err);
     return res.status(500).json({
-      message: "Internal Server Error",
+      message: safeMessage || "Internal Server Error",
+      details:
+        safeMessage ||
+        (ENVIRONMENT === "production" ? "Internal Server Error" : err.message),
+      stack: ENVIRONMENT === "production" ? undefined : err.stack,
     });
   }
 

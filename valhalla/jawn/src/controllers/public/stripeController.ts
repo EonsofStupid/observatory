@@ -5,6 +5,7 @@ import {
   Get,
   Path,
   Post,
+  Query,
   Request,
   Route,
   Security,
@@ -12,6 +13,9 @@ import {
 } from "tsoa";
 import { StripeManager } from "../../managers/stripe/StripeManager";
 import type { JawnAuthenticatedRequest } from "../../types/request";
+import { isError } from "../../packages/common/result";
+import express from "express";
+import Stripe from "stripe";
 
 export interface UpgradeToProRequest {
   addons?: {
@@ -26,6 +30,95 @@ export interface UpgradeToProRequest {
 
 export interface UpgradeToTeamBundleRequest {
   ui_mode?: "embedded" | "hosted";
+}
+
+export interface CreateCloudGatewayCheckoutSessionRequest {
+  amount: number;
+  returnUrl?: string;
+}
+
+export interface CreateSetupSessionRequest {
+  returnUrl?: string;
+}
+
+export enum PaymentIntentSearchKind {
+  CREDIT_PURCHASES = "credit_purchases",
+}
+
+export interface SearchPaymentIntentsRequest {
+  search_kind: PaymentIntentSearchKind;
+  limit?: number;
+  page?: string;
+}
+
+export interface PaymentIntentRecord {
+  id: string; // Always the payment intent ID
+  amount: number;
+  created: number;
+  status: string;
+  isRefunded?: boolean;
+  refundedAmount?: number;
+  refundIds?: string[];
+}
+
+export interface StripePaymentIntentsResponse {
+  data: PaymentIntentRecord[];
+  has_more: boolean;
+  next_page: string | null;
+  count: number;
+}
+
+export interface AutoTopoffSettings {
+  enabled: boolean;
+  thresholdCents: number;
+  topoffAmountCents: number;
+  stripePaymentMethodId: string | null;
+  lastTopoffAt: string | null;
+  consecutiveFailures: number;
+}
+
+export interface UpdateAutoTopoffSettingsRequest {
+  enabled: boolean;
+  thresholdCents: number;
+  topoffAmountCents: number;
+  stripePaymentMethodId: string;
+}
+
+export interface PaymentMethod {
+  id: string;
+  brand: string;
+  last4: string;
+  exp_month: number;
+  exp_year: number;
+}
+
+export interface DailyUsageDataPoint {
+  date: string; // ISO date string YYYY-MM-DD
+  requests: number;
+  bytes: number;
+}
+
+export interface UsageStatsResponse {
+  billingPeriod: {
+    start: string; // ISO date
+    end: string; // ISO date
+    daysElapsed: number;
+    daysTotal: number;
+  };
+  usage: {
+    totalRequests: number;
+    totalBytes: number;
+    totalGB: number;
+  };
+  dailyData: DailyUsageDataPoint[];
+  estimatedCost: {
+    requestsCost: number;
+    gbCost: number;
+    totalCost: number;
+    projectedMonthlyRequestsCost: number;
+    projectedMonthlyGBCost: number;
+    projectedMonthlyTotalCost: number;
+  };
 }
 
 export interface LLMUsage {
@@ -99,6 +192,55 @@ export class StripeController extends Controller {
 
     return result.data;
   }
+
+  @Post("/cloud/checkout-session")
+  public async createCloudGatewayCheckoutSession(
+    @Request() request: JawnAuthenticatedRequest,
+    @Body() body: CreateCloudGatewayCheckoutSessionRequest
+  ): Promise<{ checkoutUrl: string }> {
+    const stripeManager = new StripeManager(request.authParams);
+    if (body.amount < 5) {
+      this.setStatus(400);
+      throw new Error("Amount must be at least 5");
+    }
+    if (body.amount > 10000) {
+      this.setStatus(400);
+      throw new Error("Amount must not exceed 10000");
+    }
+
+    // Validate returnUrl to prevent open redirect attacks
+    if (body.returnUrl) {
+      if (!body.returnUrl.startsWith('/')) {
+        this.setStatus(400);
+        throw new Error("returnUrl must be a relative path starting with /");
+      }
+      if (body.returnUrl.includes('..')) {
+        this.setStatus(400);
+        throw new Error("returnUrl contains invalid characters");
+      }
+      // Whitelist allowed paths
+      const allowedPaths = ['/quickstart', '/credits', '/dashboard', '/settings'];
+      if (!allowedPaths.some(path => body.returnUrl?.startsWith(path))) {
+        this.setStatus(400);
+        throw new Error("returnUrl must start with one of: " + allowedPaths.join(', '));
+      }
+    }
+
+    const result = await stripeManager.createCloudGatewayCheckoutSession(
+      request.headers.origin ?? "",
+      body.amount,
+      body.returnUrl,
+    );
+
+    if (isError(result)) {
+      console.error("Error creating checkout session", JSON.stringify(result.error));
+      this.setStatus(400);
+      throw new Error(result.error);
+    }
+
+    return { checkoutUrl: result.data };
+  }
+
 
   @Post("/subscription/new-customer/upgrade-to-pro")
   public async upgradeToPro(
@@ -314,6 +456,43 @@ export class StripeController extends Controller {
   public async migrateToPro(@Request() request: JawnAuthenticatedRequest) {
     const stripeManager = new StripeManager(request.authParams);
     const result = await stripeManager.migrateToPro();
+
+    if (isError(result) || !result.data) {
+      console.error("Error migrating to pro", JSON.stringify(result.error || "No data returned"));
+      this.setStatus(400);
+      throw new Error(result.error || "Failed to migrate to pro");
+    }
+
+    return result.data;
+  }
+
+  @Get("/payment-intents/search")
+  public async searchPaymentIntents(
+    @Request() request: JawnAuthenticatedRequest,
+    @Query() search_kind: string,
+    @Query() limit?: number,
+    @Query() page?: string
+  ): Promise<StripePaymentIntentsResponse> {
+    // Check if search_kind is valid
+    if (!Object.values(PaymentIntentSearchKind).includes(search_kind as PaymentIntentSearchKind)) {
+      this.setStatus(400);
+      throw new Error(`Invalid search_kind: ${search_kind}. Supported types: ${Object.values(PaymentIntentSearchKind).join(", ")}`);
+    }
+
+    const searchKind = search_kind as PaymentIntentSearchKind;
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.searchPaymentIntents(
+      searchKind,
+      limit ?? 10,
+      page
+    );
+
+    if (isError(result)) {
+      this.setStatus(500);
+      throw new Error(result.error);
+    }
+
+    return result.data;
   }
 
   @Get("/subscription")
@@ -364,21 +543,167 @@ export class StripeController extends Controller {
     };
   }
 
-  @Post("/webhook")
-  public async handleStripeWebhook(
-    @Body() body: any,
+  @Get("/auto-topoff/settings")
+  public async getAutoTopoffSettings(
     @Request() request: JawnAuthenticatedRequest
-  ): Promise<void> {
+  ): Promise<AutoTopoffSettings | null> {
     const stripeManager = new StripeManager(request.authParams);
-    const signature = request.headers["stripe-signature"] as string;
-
-    const result = await stripeManager.handleStripeWebhook(body, signature);
+    const result = await stripeManager.getAutoTopoffSettings();
 
     if (result.error) {
-      console.error("Error processing webhook:", result.error);
-      this.setStatus(400);
-    } else {
-      this.setStatus(200);
+      console.error(result.error);
+      return null;
     }
+
+    return result.data;
+  }
+
+  @Post("/auto-topoff/settings")
+  public async updateAutoTopoffSettings(
+    @Request() request: JawnAuthenticatedRequest,
+    @Body() body: UpdateAutoTopoffSettingsRequest
+  ): Promise<AutoTopoffSettings> {
+    // Validation
+    if (body.thresholdCents < 0) {
+      this.setStatus(400);
+      throw new Error("Threshold must be non-negative");
+    }
+    if (body.topoffAmountCents <= 0) {
+      this.setStatus(400);
+      throw new Error("Top-off amount must be positive");
+    }
+    if (body.topoffAmountCents < 500) {
+      this.setStatus(400);
+      throw new Error("Top-off amount must be at least $5");
+    }
+    if (body.topoffAmountCents > 1000000) {
+      this.setStatus(400);
+      throw new Error("Top-off amount must not exceed $10,000");
+    }
+
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.updateAutoTopoffSettings(body);
+
+    if (result.error) {
+      this.setStatus(400);
+      throw new Error(result.error);
+    }
+
+    if (!result.data) {
+      this.setStatus(500);
+      throw new Error("Failed to update auto topoff settings");
+    }
+
+    return result.data;
+  }
+
+  @Delete("/auto-topoff/settings")
+  public async disableAutoTopoff(
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<{ success: boolean }> {
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.disableAutoTopoff();
+
+    if (result.error) {
+      this.setStatus(400);
+      throw new Error(result.error);
+    }
+
+    return { success: true };
+  }
+
+  @Get("/payment-methods")
+  public async getPaymentMethods(
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<PaymentMethod[]> {
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.getPaymentMethods();
+
+    if (result.error) {
+      this.setStatus(500);
+      throw new Error(result.error);
+    }
+
+    if (!result.data) {
+      this.setStatus(500);
+      throw new Error("Failed to fetch payment methods");
+    }
+
+    return result.data;
+  }
+
+  @Post("/payment-methods/setup-session")
+  public async createSetupSession(
+    @Request() request: JawnAuthenticatedRequest,
+    @Body() body: CreateSetupSessionRequest
+  ): Promise<{ setupUrl: string }> {
+    // Validate returnUrl to prevent open redirect attacks
+    if (body.returnUrl) {
+      if (!body.returnUrl.startsWith("/")) {
+        this.setStatus(400);
+        throw new Error("returnUrl must be a relative path starting with /");
+      }
+      if (body.returnUrl.includes("..")) {
+        this.setStatus(400);
+        throw new Error("returnUrl contains invalid characters");
+      }
+      // Whitelist allowed paths
+      const allowedPaths = ["/credits", "/settings"];
+      if (!allowedPaths.some((path) => body.returnUrl?.startsWith(path))) {
+        this.setStatus(400);
+        throw new Error(
+          "returnUrl must start with one of: " + allowedPaths.join(", ")
+        );
+      }
+    }
+
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.createSetupSession(
+      request.headers.origin ?? "",
+      body.returnUrl
+    );
+
+    if (result.error) {
+      this.setStatus(400);
+      throw new Error(result.error);
+    }
+
+    if (!result.data) {
+      this.setStatus(500);
+      throw new Error("Failed to create setup session");
+    }
+
+    return { setupUrl: result.data };
+  }
+
+  @Delete("/payment-methods/{paymentMethodId}")
+  public async removePaymentMethod(
+    @Request() request: JawnAuthenticatedRequest,
+    @Path() paymentMethodId: string
+  ): Promise<{ success: boolean }> {
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.removePaymentMethod(paymentMethodId);
+
+    if (result.error) {
+      this.setStatus(400);
+      throw new Error(result.error);
+    }
+
+    return { success: true };
+  }
+
+  @Get("/subscription/usage-stats")
+  public async getUsageStats(
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<UsageStatsResponse | null> {
+    const stripeManager = new StripeManager(request.authParams);
+    const result = await stripeManager.getUsageStats();
+
+    if (result.error) {
+      this.setStatus(400);
+      throw new Error(result.error);
+    }
+
+    return result.data;
   }
 }

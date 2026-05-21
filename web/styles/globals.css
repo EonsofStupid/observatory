@@ -35,13 +35,17 @@
     --muted: 210 40% 96%; /* hsl(210, 40%, 96%) */
     --muted-foreground: 215 16% 47%; /* hsl(215, 16%, 47%) */
 
+    /* Subdued Colors */
+    --subdued: 210 40% 96%; /* hsl(210, 40%, 96%) */
+    --subdued-foreground: 220 20% 35%; /* hsl(220, 20%, 35%) */
+
     /* Accent Colors */
     --accent: 210 40% 96%; /* hsl(210, 40%, 96%) */
     --accent-foreground: 222 47% 11%; /* hsl(222, 47%, 11%) */
 
     /* Destructive Colors */
     --destructive: 0 72% 51%; /* hsl(0, 72%, 51%) */
-    --destructive-foreground: 0 75% 15%; /* hsl(0, 75%, 15%) */
+    --destructive-foreground: 0 0% 95%; /* off-white text on red background */
 
     /* Border Colors */
     --border: 214 32% 91%; /* hsl(214, 32%, 91%) */
@@ -92,16 +96,20 @@
     --primary-foreground: 204 80% 16%;
 
     /* Secondary Colors */
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 217 33% 17%; /* hsl(217, 33%, 17%) */
+    --secondary-foreground: 210 40% 98%; /* hsl(210, 40%, 98%) */
 
     /* Muted Colors */
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
+    --muted: 217 33% 17%; /* hsl(217, 33%, 17%) */
+    --muted-foreground: 215 20% 65%; /* hsl(215, 20%, 65%) */
+
+    /* Subdued Colors */
+    --subdued: 217 33% 17%; /* hsl(217, 33%, 17%) */
+    --subdued-foreground: 215 25% 80%; /* hsl(215, 25%, 80%) */
 
     /* Accent Colors */
-    --accent: 217 33% 17%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 217 33% 17%; /* hsl(217, 33%, 17%) */
+    --accent-foreground: 210 40% 98%; /* hsl(210, 40%, 98%) */
 
     /* Destructive Colors */
     --destructive: 0 63% 31%;
@@ -156,8 +164,16 @@
   @apply transition-transform hover:shadow-md active:scale-95;
 }
 
-::-webkit-scrollbar-thumb {
-  @apply cursor-grab rounded-full border-2 border-solid border-slate-200 bg-white hover:shadow-md;
+:not(.scrollbar-auto-hide)::-webkit-scrollbar {
+  @apply w-2;
+}
+
+:not(.scrollbar-auto-hide)::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+:not(.scrollbar-auto-hide)::-webkit-scrollbar-thumb {
+  @apply cursor-grab rounded-full border border-solid border-slate-200/50 bg-slate-300/60 hover:bg-slate-400/80 dark:border-slate-800/50 dark:bg-slate-700/60 dark:hover:bg-slate-600/80;
 }
 
 .text-primary {
@@ -174,6 +190,40 @@
   }
 }
 
+@keyframes bounce-dot {
+  to {
+    transform: translateY(-3px);
+  }
+}
+
+.animate-bounce-dot {
+  animation: bounce-dot 0.5s infinite alternate;
+}
+
 .text-tertiary {
   @apply text-slate-400 dark:text-slate-600;
 }
+
+/* StreamDown code block styling */
+[data-streamdown="code-block"] {
+  @apply rounded-lg border border-border bg-muted;
+}
+
+[data-streamdown="code-block"] pre {
+  @apply rounded-lg p-4 overflow-x-auto;
+}
+
+[data-streamdown="code-block"] code {
+  @apply text-sm font-mono;
+  text-shadow: none !important;
+}
+
+[data-streamdown="code-block"] code span {
+  text-shadow: none !important;
+}
+
+[data-streamdown="inline-code"] {
+  @apply bg-slate-200 dark:bg-slate-800 px-1.5 py-0.5 rounded text-sm font-mono;
+  word-break: break-all;
+}
+

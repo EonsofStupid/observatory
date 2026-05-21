@@ -10,14 +10,31 @@ import {
   checkLimits,
   checkLimitsSingle,
 } from "./managers/UsageLimitManager.ts";
-import { HeliconeHeaders } from "./models/HeliconeHeaders";
+import {
+  HeliconeHeaders,
+  HeliconeTokenLimitExceptionHandler,
+} from "./models/HeliconeHeaders";
+import {
+  applyFallbackStrategy,
+  applyMiddleOutStrategy,
+  applyTruncateStrategy,
+  estimateTokenCount,
+  getModelTokenLimit,
+  parseRequestPayload,
+  resolvePrimaryModel,
+} from "./util/tokenLimitException";
+import { Provider } from "@helicone-package/llm-mapper/types";
 import { getAndStoreInCache } from "./util/cache/secureCache";
 import { Result, err, map, mapPostgrestErr, ok } from "./util/results";
-import { Sha256 } from "@aws-crypto/sha256-js";
 import { parseJSXObject } from "@helicone/prompts";
-import { HttpRequest } from "@smithy/protocol-http";
-import { SignatureV4 } from "@smithy/signature-v4";
 import { HELICONE_API_KEY_REGEX } from "./util/apiKeyRegex";
+import { Attempt } from "./ai-gateway/types";
+import { DataDogClient, getDataDogClient } from "./monitoring/DataDogClient";
+import {
+  IRequestBodyBuffer,
+  ValidRequestBody,
+} from "../RequestBodyBuffer/IRequestBodyBuffer";
+import { RequestBodyBufferBuilder } from "../RequestBodyBuffer/RequestBodyBufferBuilder";
 
 export type RequestHandlerType =
   | "proxy_only"
@@ -62,8 +79,9 @@ export class RequestWrapper {
   extraHeaders: Headers | null = null;
   requestReferrer: string | undefined;
 
-  private cachedText: string | null = null;
   private bodyKeyOverride: object | null = null;
+
+  private gatewayAttempt?: Attempt;
 
   /*
   We allow the Authorization header to take both the provider key and the helicone auth key comma seprated.
@@ -101,11 +119,11 @@ export class RequestWrapper {
           return headers;
         } catch (error) {
           console.error(`Failed retrieving API key from path: ${error}`);
-          return request.headers;
+          return headers;
         }
       }
 
-      return request.headers;
+      return headers;
     }
 
     if (headers.has("helicone-auth")) {
@@ -131,6 +149,8 @@ export class RequestWrapper {
     }
     return headers;
   }
+
+  // TODO we reallllyyyy should not be calling this.. it's hacky
   public resetObject() {
     this.url = new URL(this.originalUrl);
     this.headers = this.mutatedAuthorizationHeaders(this.request);
@@ -141,7 +161,9 @@ export class RequestWrapper {
 
   private constructor(
     private request: Request,
-    private env: Env
+    private env: Env,
+    readonly requestBodyBuffer: IRequestBodyBuffer,
+    private readonly dataDogClient: DataDogClient | undefined
   ) {
     this.url = new URL(request.url);
     this.originalUrl = new URL(request.url);
@@ -208,7 +230,22 @@ export class RequestWrapper {
     request: Request,
     env: Env
   ): Promise<Result<RequestWrapper, string>> {
-    const requestWrapper = new RequestWrapper(request, env);
+    let dataDogClient: DataDogClient | undefined;
+    // Get DataDog client singleton (persists across all requests)
+    if ((env.DATADOG_ENABLED ?? "false") === "true") {
+      dataDogClient = getDataDogClient(env);
+    }
+    const requestBodyBuffer = await RequestBodyBufferBuilder(
+      request,
+      dataDogClient,
+      env
+    );
+    const requestWrapper = new RequestWrapper(
+      request,
+      env,
+      requestBodyBuffer,
+      dataDogClient
+    );
     const authorization = await requestWrapper.setAuthorization(env);
 
     if (authorization.error) {
@@ -265,24 +302,124 @@ export class RequestWrapper {
     this.bodyKeyOverride = bodyKeyOverride;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private overrideBody(body: any, override: object): object {
-    for (const [key, value] of Object.entries(override)) {
-      if (key in body && typeof value !== "object") {
-        body[key] = value;
-      } else {
-        body[key] = this.overrideBody(body[key], value);
-      }
+  async applyBodyOverrides(): Promise<void> {
+    const overrides: Record<string, any> = {};
+
+    if (this.bodyKeyOverride) {
+      Object.assign(overrides, this.bodyKeyOverride);
     }
-    return body;
+
+    if (this.heliconeHeaders.featureFlags.streamUsage) {
+      if (!overrides["stream_options"]) {
+        overrides["stream_options"] = {};
+      }
+      overrides["stream_options"]["include_usage"] = true;
+    }
+
+    if (Object.keys(overrides).length > 0) {
+      await this.requestBodyBuffer.setBodyOverride(overrides);
+    }
   }
 
-  async getRawText(): Promise<string> {
-    if (this.cachedText) {
-      return this.cachedText;
+  async applyTokenLimitExceptionHandler(provider: Provider): Promise<void> {
+    const handler = this.heliconeHeaders.tokenLimitExceptionHandler;
+    if (!handler) {
+      return;
     }
-    this.cachedText = await this.request.text();
-    return this.cachedText;
+
+    const bodyText = await this.requestBodyBuffer.unsafeGetRawText();
+    const parsedBody = parseRequestPayload(bodyText);
+    if (!parsedBody) {
+      return;
+    }
+
+    const primaryModel = resolvePrimaryModel(
+      parsedBody,
+      this.heliconeHeaders.modelOverride
+    );
+
+    if (!primaryModel) {
+      return;
+    }
+
+    const estimatedTokens = estimateTokenCount(parsedBody, primaryModel);
+    const modelContextLimit = getModelTokenLimit(provider, primaryModel);
+
+    // Extract requested completion/output limit (provider-agnostic best-effort)
+    const anyBody = parsedBody as any;
+    const completionCandidates: Array<unknown> = [
+      anyBody?.max_completion_tokens,
+      anyBody?.max_tokens,
+      anyBody?.max_output_tokens,
+      anyBody?.maxOutputTokens,
+      anyBody?.response?.max_tokens,
+      anyBody?.response?.max_output_tokens,
+      anyBody?.response?.maxOutputTokens,
+      anyBody?.generation_config?.max_output_tokens,
+      anyBody?.generation_config?.maxOutputTokens,
+      anyBody?.generationConfig?.max_output_tokens,
+      anyBody?.generationConfig?.maxOutputTokens,
+    ];
+    const requestedCompletionTokens = (() => {
+      for (const val of completionCandidates) {
+        if (typeof val === "number" && Number.isFinite(val) && val > 0) {
+          return Math.floor(val);
+        }
+      }
+      return 0;
+    })();
+    const tokenLimit =
+      modelContextLimit === null
+        ? null
+        : Math.max(
+            0,
+            modelContextLimit -
+              (requestedCompletionTokens || modelContextLimit * 0.1)
+          );
+
+    // For Fallback strategy, we proceed even if tokenLimit is null (model not in registry)
+    // because we can still switch to the fallback model based on the model list
+    const shouldSkip =
+      estimatedTokens === null ||
+      (handler === HeliconeTokenLimitExceptionHandler.Fallback
+        ? false // Never skip for Fallback - always try to apply it
+        : tokenLimit === null ||
+          estimatedTokens <= tokenLimit);
+
+    if (shouldSkip) {
+      return;
+    }
+
+    let modifiedBody: ValidRequestBody | undefined;
+    switch (handler) {
+      case HeliconeTokenLimitExceptionHandler.Truncate:
+        modifiedBody = applyTruncateStrategy(parsedBody, primaryModel, tokenLimit);
+        break;
+      case HeliconeTokenLimitExceptionHandler.MiddleOut:
+        modifiedBody = applyMiddleOutStrategy(parsedBody, primaryModel, tokenLimit);
+        break;
+      case HeliconeTokenLimitExceptionHandler.Fallback:
+        modifiedBody = applyFallbackStrategy(
+          parsedBody,
+          primaryModel,
+          estimatedTokens,
+          tokenLimit // Can be null if model not in registry
+        );
+        break;
+    }
+
+    if (typeof modifiedBody === "string") {
+      await this.requestBodyBuffer.tempSetBody(modifiedBody);
+    }
+  }
+
+  // TODO deprecate this function
+  async unsafeGetRawText(): Promise<string> {
+    return this.requestBodyBuffer.unsafeGetRawText();
+  }
+
+  getDataDogClient(): DataDogClient | undefined {
+    return this.dataDogClient;
   }
 
   shouldFormatPrompt(): boolean {
@@ -300,33 +437,42 @@ export class RequestWrapper {
     return !!hostParts.includes("eu") || !!auth?.includes("helicone-eu");
   }
 
-  async getText(): Promise<string> {
-    let text = await this.getRawText();
+  async safelyGetBody(): Promise<ValidRequestBody> {
+    if (this.shouldFormatPrompt()) {
+      throw new Error(
+        "Cannot safely get body for request using legacy prompts"
+      );
+    }
 
-    if (this.bodyKeyOverride) {
-      try {
-        const bodyJson = await JSON.parse(text);
-        const bodyOverrideJson = await JSON.parse(
-          JSON.stringify(this.bodyKeyOverride)
-        );
-        const body = this.overrideBody(bodyJson, bodyOverrideJson);
-        text = JSON.stringify(body);
-      } catch (e) {
-        throw new Error("Could not stringify bodyKeyOverride");
-      }
-    } else if (this.shouldFormatPrompt()) {
+    await this.applyBodyOverrides();
+    return await this.requestBodyBuffer.getReadableStreamToBody();
+  }
+
+  async unsafeGetBodyText(): Promise<string> {
+    await this.applyBodyOverrides();
+
+    // Unsafely load text from buffer post-overrides
+    const text = await this.unsafeGetRawText();
+
+    // Legacy prompts (todo: remove) unfortunately we load into memory here
+    if (this.shouldFormatPrompt()) {
       const { objectWithoutJSXTags } = parseJSXObject(JSON.parse(text));
-
       return JSON.stringify(objectWithoutJSXTags);
     }
+
     return text;
   }
 
-  async getJson<T>(): Promise<T> {
+  // TODO: change func and its references to use safelyGetBody
+  async unsafeGetJson<T>(): Promise<T> {
     try {
-      return JSON.parse(await this.getText());
+      return JSON.parse(await this.unsafeGetBodyText());
     } catch (e) {
-      console.error("RequestWrapper.getJson", e, await this.getText());
+      console.error(
+        "RequestWrapper.getJson",
+        e,
+        await this.unsafeGetBodyText()
+      );
       return {} as T;
     }
   }
@@ -376,75 +522,17 @@ export class RequestWrapper {
     region: string;
     forwardToHost: string;
   }) {
-    // Extract model from URL path
-    const pathParts = this.url.pathname.split("/");
-    const model = decodeURIComponent(pathParts.at(-2) ?? "");
-
-    const awsAccessKey = this.headers.get("aws-access-key");
-    const awsSecretKey = this.headers.get("aws-secret-key");
-    const awsSessionToken = this.headers.get("aws-session-token");
-    const service = "bedrock";
-
-    const sigv4 = new SignatureV4({
-      service,
+    const { newHeaders, model } = await this.requestBodyBuffer.signAWSRequest({
       region,
-      credentials: {
-        accessKeyId: awsAccessKey ?? "",
-        secretAccessKey: awsSecretKey ?? "",
-        ...(awsSessionToken ? { sessionToken: awsSessionToken } : {}),
-      },
-      sha256: Sha256,
-    });
-
-    const headers = new Headers();
-
-    // Required headers for AWS requests
-    headers.set("host", forwardToHost);
-    headers.set("content-type", "application/json");
-
-    // Include only AWS-specific headers needed for authentication
-    const awsHeaders = [
-      "x-amz-date",
-      "x-amz-security-token",
-      "x-amz-content-sha256",
-      "x-amz-target",
-      // Add any other required x-amz headers for your specific use case
-    ];
-
-    for (const [key, value] of this.headers.entries()) {
-      if (awsHeaders.includes(key.toLowerCase())) {
-        headers.set(key, value);
-      }
-    }
-
-    const url = new URL(this.url.toString());
-    const request = new HttpRequest({
+      forwardToHost,
+      requestHeaders: Object.fromEntries(this.headers.entries()),
       method: this.request.method,
-      protocol: url.protocol,
-      hostname: forwardToHost,
-      path: url.pathname + url.search,
-      headers: Object.fromEntries(headers.entries()),
-      body: await this.getRawText(),
+      urlString: this.url.toString(),
     });
-
-    const signedRequest = await sigv4.sign(request);
-
-    // Create new headers with the signed values
-    const newHeaders = new Headers();
-    // Only copy over the essential headers
-    newHeaders.set("host", forwardToHost);
-    newHeaders.set("content-type", "application/json");
 
     // Add model override header if model was found
     if (model) {
       this.heliconeHeaders.setModelOverride(model);
-    }
-
-    // Add all the signed AWS headers
-    for (const [key, value] of Object.entries(signedRequest.headers)) {
-      if (value) {
-        newHeaders.set(key, value.toString());
-      }
     }
 
     this.remapHeaders(newHeaders);
@@ -479,7 +567,7 @@ export class RequestWrapper {
     return ok(null);
   }
 
-  async getRawProviderAuthHeader(): Promise<string | undefined> {
+  getRawProviderAuthHeader(): string | undefined {
     let auth = this.authorization;
     if (auth?.startsWith("Bearer ")) {
       auth = auth.split(" ")[1];
@@ -493,8 +581,7 @@ export class RequestWrapper {
 
   async getUserId(): Promise<string | undefined> {
     const userId =
-      this.heliconeHeaders.userId ||
-      (await this.getJson<{ user?: string }>()).user;
+      this.heliconeHeaders.userId || (await this.requestBodyBuffer.userId());
     return userId;
   }
 
@@ -597,7 +684,8 @@ export class RequestWrapper {
       `getProxy-CP-${authKey}`,
       env,
       async () =>
-        await getProviderKeyFromPortalKey(authKey, env, supabaseClient)
+        await getProviderKeyFromPortalKey(authKey, env, supabaseClient),
+      43200 // 12 hours
     );
   }
 
@@ -632,8 +720,16 @@ export class RequestWrapper {
     };
   }
 
-  setBody(body: string): void {
-    this.cachedText = body;
+  async setBody(body: string): Promise<void> {
+    await this.requestBodyBuffer.tempSetBody(body);
+  }
+
+  setGatewayAttempt(attempt: Attempt): void {
+    this.gatewayAttempt = attempt;
+  }
+
+  getGatewayAttempt(): Attempt | undefined {
+    return this.gatewayAttempt;
   }
 }
 
@@ -656,7 +752,8 @@ export async function getProviderKeyFromProxyCache(
   return await getAndStoreInCache(
     `getProxyKey-${authKey}`,
     env,
-    async () => await getProviderKeyFromProxy(authKey, env, supabaseClient)
+    async () => await getProviderKeyFromProxy(authKey, env, supabaseClient),
+    43200 // 12 hours
   );
 }
 
@@ -701,8 +798,6 @@ export async function getProviderKeyFromPortalKey(
 
   if (check.error) {
     return err(check.error);
-  } else {
-    console.log("check.data", check.data);
   }
 
   const providerKey = await supabaseClient

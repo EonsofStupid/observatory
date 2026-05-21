@@ -33,6 +33,15 @@ export interface SessionResult {
   completion_tokens: number;
   total_tokens: number;
   avg_latency: number;
+  user_ids: string[];
+}
+
+export interface SessionsAggregateMetrics {
+  count: number;
+  total_cost: number;
+  avg_cost: number;
+  avg_latency: number;
+  avg_requests: number;
 }
 
 export interface SessionNameResult {
@@ -259,20 +268,18 @@ export class SessionManager {
     );
   }
 
-  async getSessions(
+  private async buildSessionFilters(
     requestBody: SessionQueryParams
-  ): Promise<Result<SessionResult[], string>> {
+  ): Promise<{
+    builtFilter: any;
+    havingFilter: any;
+  }> {
     const {
       search,
       timeFilter,
-      timezoneDifference,
       filter: filterTree,
       nameEquals,
     } = requestBody;
-
-    if (!isValidTimeZoneDifference(timezoneDifference)) {
-      return err("Invalid timezone difference");
-    }
 
     const filters: FilterNode[] = [...timeFilterNodes(timeFilter), filterTree];
 
@@ -329,9 +336,31 @@ export class SessionManager {
       having: true,
     });
 
+    return { builtFilter, havingFilter };
+  }
+
+  async getSessions(
+    requestBody: SessionQueryParams
+  ): Promise<Result<SessionResult[], string>> {
+    const {
+      timezoneDifference,
+      offset: rawOffset = 0,
+      limit: rawLimit = 50,
+    } = requestBody;
+
+    if (!isValidTimeZoneDifference(timezoneDifference)) {
+      return err("Invalid timezone difference");
+    }
+
+    // Validate and clamp numeric values to prevent SQL injection
+    const limit = Math.max(0, Math.min(Math.floor(Number(rawLimit) || 50), 1000));
+    const offset = Math.max(0, Math.floor(Number(rawOffset) || 0));
+
+    const { builtFilter, havingFilter } = await this.buildSessionFilters(requestBody);
+
     // Step 1 get all the properties given this filter
     const query = `
-    SELECT 
+    SELECT
       min(request_response_rmt.request_created_at) + INTERVAL ${timezoneDifference} MINUTE AS created_at,
       max(request_response_rmt.request_created_at) + INTERVAL ${timezoneDifference} MINUTE AS latest_request_created_at,
       properties['Helicone-Session-Id'] as session_id,
@@ -341,7 +370,8 @@ export class SessionManager {
       count(*) AS total_requests,
       sum(request_response_rmt.prompt_tokens) AS prompt_tokens,
       sum(request_response_rmt.completion_tokens) AS completion_tokens,
-      sum(request_response_rmt.prompt_tokens) + sum(request_response_rmt.completion_tokens) AS total_tokens
+      sum(request_response_rmt.prompt_tokens) + sum(request_response_rmt.completion_tokens) AS total_tokens,
+      groupUniqArray(request_response_rmt.user_id) AS user_ids
     FROM request_response_rmt
     WHERE (
         has(properties, 'Helicone-Session-Id')
@@ -351,8 +381,9 @@ export class SessionManager {
     )
     GROUP BY properties['Helicone-Session-Id'], properties['Helicone-Session-Name']
     HAVING (${havingFilter.filter})
-    ORDER BY created_at DESC -- TODO: REMOVE FOR TEST
-    LIMIT 50
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+    OFFSET ${offset}
     `;
 
     const results = await clickhouseDb.dbQuery<SessionResult>(
@@ -360,7 +391,7 @@ export class SessionManager {
       builtFilter.argsAcc
     );
 
-    return resultMap(results, (x) =>
+    const mappedResults = resultMap(results, (x) =>
       x.map((y) => ({
         ...y,
         completion_tokens: +y.completion_tokens,
@@ -369,6 +400,86 @@ export class SessionManager {
         avg_latency: +y.avg_latency,
       }))
     );
+
+    if (!mappedResults.data) {
+      return err(mappedResults.error);
+    }
+
+    return ok(mappedResults.data);
+  }
+
+  async getSessionsCount(
+    requestBody: SessionQueryParams
+  ): Promise<Result<SessionsAggregateMetrics, string>> {
+    const { timezoneDifference } = requestBody;
+
+    if (!isValidTimeZoneDifference(timezoneDifference)) {
+      return err("Invalid timezone difference");
+    }
+
+    const { builtFilter, havingFilter } = await this.buildSessionFilters(requestBody);
+
+    const countQuery = `
+    SELECT
+      count(DISTINCT (properties['Helicone-Session-Id'], properties['Helicone-Session-Name'])) as count
+    FROM request_response_rmt
+    WHERE (
+        has(properties, 'Helicone-Session-Id')
+        AND (
+          ${builtFilter.filter}
+        )
+    )
+    HAVING (${havingFilter.filter})
+    `;
+
+    const countResult = await clickhouseDb.dbQuery<{ count: number }>(
+      countQuery,
+      builtFilter.argsAcc
+    );
+
+    if (!countResult.data) {
+      return err(countResult.error ?? "Error getting sessions count");
+    }
+
+    const sessionsCount = +countResult.data[0].count;
+
+    const metricsQuery = `
+    SELECT
+      sum(cost) / ${COST_PRECISION_MULTIPLIER} as total_cost,
+      (sum(cost) / ${COST_PRECISION_MULTIPLIER}) / ${sessionsCount} as avg_cost,
+      (sum(latency) / ${sessionsCount}) as avg_latency,
+      count(*) / ${sessionsCount} as avg_requests
+    FROM request_response_rmt
+    WHERE (
+        has(properties, 'Helicone-Session-Id')
+        AND (
+          ${builtFilter.filter}
+        )
+    )
+    HAVING (${havingFilter.filter})
+    `;
+
+    const metricsResult = await clickhouseDb.dbQuery<{
+      total_cost: number,
+      avg_cost: number,
+      avg_latency: number,
+      avg_requests: number,
+    }>(
+      metricsQuery,
+      builtFilter.argsAcc
+    );
+
+    if (!metricsResult.data) {
+      return err(metricsResult.error ?? "Error getting sessions metrics");
+    }
+
+    return ok({
+      count: sessionsCount,
+      total_cost: +metricsResult.data[0].total_cost,
+      avg_cost: +metricsResult.data[0].avg_cost,
+      avg_latency: +metricsResult.data[0].avg_latency,
+      avg_requests: +metricsResult.data[0].avg_requests,
+    });
   }
 
   async updateSessionFeedback(

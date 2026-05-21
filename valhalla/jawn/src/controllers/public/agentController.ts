@@ -15,8 +15,11 @@ import { type JawnAuthenticatedRequest } from "../../types/request";
 import { type OpenAIChatRequest } from "@helicone-package/llm-mapper/mappers/openai/chat-v2";
 import OpenAI from "openai";
 import { getHeliconeDefaultTempKey } from "../../lib/experiment/tempKeys/tempAPIKey";
-import { ENVIRONMENT } from "../../lib/clients/constant";
-import { HeliconeChatCreateParams } from "@helicone-package/prompts/types";
+import { ENVIRONMENT, GET_KEY } from "../../lib/clients/constant";
+import {
+  HeliconeChatCreateParams,
+  HeliconeChatCreateParamsStreaming,
+} from "@helicone-package/prompts/types";
 import {
   InAppThreadsManager,
   InAppThread,
@@ -60,6 +63,8 @@ export class AgentController extends Controller {
         );
       }
 
+      const PROMPT_ID = await GET_KEY("key:helix_prompt_id");
+
       return tempKey.data.with<
         Result<
           | OpenAI.Chat.Completions.ChatCompletion
@@ -77,38 +82,40 @@ export class AgentController extends Controller {
               request.authParams.organizationId,
             "Helicone-User-Id": request.authParams.userId,
             "Helicone-Property-Is-Agent": "true",
+            "Helicone-RateLimit-Policy": "100;w=86400;s=user",
           },
         });
         const abortController = new AbortController();
 
         try {
-          const response = await openai.chat.completions.create(
-            {
-              model: params.model,
-              messages: params.messages,
-              temperature: params.temperature,
-              max_tokens: params.max_tokens,
-              top_p: params.top_p,
-              frequency_penalty: params.frequency_penalty,
-              presence_penalty: params.presence_penalty,
-              stop: params.stop,
-              stream: params.stream !== undefined,
-              response_format: params.response_format,
-              tools: params.tools,
-              reasoning_effort: params.reasoning_effort,
-              verbosity: params.verbosity,
-              stream_options: { include_usage: true },
+          const body = {
+            model: params.model as string,
+            messages:
+              (params.messages as HeliconeChatCreateParams["messages"]) || [],
+            temperature: params.temperature,
+            max_tokens: params.max_tokens,
+            top_p: params.top_p,
+            frequency_penalty: params.frequency_penalty,
+            presence_penalty: params.presence_penalty,
+            stop: params.stop,
+            stream: Boolean(params.stream),
+            response_format: params.response_format as any,
+            tools: params.tools,
+            reasoning_effort: params.reasoning_effort,
+            verbosity: params.verbosity,
+            stream_options: { include_usage: true },
 
-              // Helicone Prompt Params
-              prompt_id:
-                bodyParams.prompt_id ?? process.env.HELI_AGENT_PROMPT_ID,
-              environment: bodyParams.environment,
-              inputs: bodyParams.inputs,
-            } as HeliconeChatCreateParams,
-            {
-              signal: abortController.signal,
-            }
-          );
+            // Helicone Prompt Params
+            prompt_id: bodyParams.prompt_id ?? PROMPT_ID,
+            environment: bodyParams.environment,
+            inputs: bodyParams.inputs,
+          } satisfies
+            | HeliconeChatCreateParams
+            | HeliconeChatCreateParamsStreaming;
+
+          const response = await openai.chat.completions.create(body as any, {
+            signal: abortController.signal,
+          });
 
           if (params.stream) {
             // Set up streaming response
@@ -209,7 +216,7 @@ export class AgentController extends Controller {
     @Path() sessionId: string,
     @Body()
     bodyParams: {
-      messages: OpenAI.Chat.ChatCompletionMessageParam[];
+      messages: any[];
       metadata: {
         posthogSession?: string;
         [key: string]: any;
@@ -267,6 +274,39 @@ export class AgentController extends Controller {
     return ok(result.data!);
   }
 
+  @Post("/thread/create-and-escalate")
+  public async createAndEscalateThread(
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<InAppThread, string>> {
+    const threadsManager = new InAppThreadsManager(request.authParams);
+
+    const result = await threadsManager.createAndEscalateThread();
+
+    if (result.error) {
+      this.setStatus(400);
+      return err(result.error);
+    }
+
+    return ok(result.data!);
+  }
+
+  @Post("/thread/{sessionId}/reopen")
+  public async reopenThread(
+    @Path() sessionId: string,
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<InAppThread, string>> {
+    const threadsManager = new InAppThreadsManager(request.authParams);
+
+    const result = await threadsManager.reopenThread(sessionId);
+
+    if (result.error) {
+      this.setStatus(400);
+      return err(result.error);
+    }
+
+    return ok(result.data!);
+  }
+
   @Get("/threads")
   public async getAllThreads(
     @Request() request: JawnAuthenticatedRequest
@@ -306,6 +346,9 @@ export class AgentController extends Controller {
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<string, string>> {
     const { query } = bodyParams;
+    const mcpTool =
+      (await GET_KEY("key:mintlify_mcp_tool")) ||
+      "SearchHeliconeOssLlmObservability";
 
     try {
       const response = await fetch(`https://docs.helicone.ai/mcp`, {
@@ -318,9 +361,9 @@ export class AgentController extends Controller {
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          method: "tools/call", // Fixed: was "tool/call", should be "tools/call"
+          method: "tools/call",
           params: {
-            name: "Search", // Fixed: moved name to correct level
+            name: mcpTool,
             arguments: {
               query,
             },

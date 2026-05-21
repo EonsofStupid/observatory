@@ -1,8 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { H2, P } from "@/components/ui/typography";
+import DOMPurify from "dompurify";
 import {
   Archive,
   Bell,
+  Database,
   GitBranch,
   Layers,
   Plus,
@@ -18,7 +20,7 @@ import { createHighlighter } from "shiki";
 // Create a singleton highlighter instance
 const highlighterPromise = createHighlighter({
   themes: ["github-light", "github-dark"],
-  langs: ["javascript", "python", "bash", "http", "plaintext"],
+  langs: ["javascript", "python", "bash", "http", "plaintext", "sql"],
 });
 
 interface EmptyStateFeature {
@@ -50,15 +52,20 @@ export const EMPTY_STATE_FEATURES: Record<string, EmptyStateFeature> = {
   prompts: {
     title: "Create Your First Prompt",
     description:
-      "Design, test, and version control your AI prompts all in one place.",
+      "Design, version, and deploy prompts through the AI Gateway. No code changes needed.",
     icon: Tag,
     featureImage: {
       type: "code",
-      content: `// 1. Format your prompt with variables
-const prompt = hpf\`Explain \${{ topic }} to a \${{ audience }}\`;
-
-// 2. Send requests with the prompt ID
-headers: { "Helicone-Prompt-Id": "explain_topic" }`,
+      content: `// Deploy your prompt template through the AI Gateway
+const response = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  prompt_id: "customer-support",
+  inputs: {
+    customer_name: "Sarah",
+    issue: "refund request",
+    sentiment: "frustrated"
+  }
+});`,
       language: "typescript",
       maxWidth: "2xl",
     },
@@ -70,7 +77,7 @@ headers: { "Helicone-Prompt-Id": "explain_topic" }`,
       },
       secondary: {
         text: "View Docs",
-        link: "https://docs.helicone.ai/features/prompts",
+        link: "https://docs.helicone.ai/features/advanced-usage/prompts",
       },
     },
   },
@@ -234,6 +241,38 @@ Helicone-Property-UseCase: email_campaign`,
       },
     },
   },
+  hql: {
+    title: "Request Access to HQL",
+    description:
+      "Query your Helicone data with HQL (Helicone Query Language). Analyze requests, tokens, costs, and custom properties across your entire LLM usage.",
+    icon: Database,
+    featureImage: {
+      type: "code",
+      content: `-- Find your most expensive requests in the last 7 days
+SELECT 
+  request_created_at,
+  request_model,
+  response_body,
+  provider_total_cost
+FROM request_response_rmt
+WHERE request_created_at > now() - INTERVAL 7 DAY
+ORDER BY provider_total_cost DESC
+LIMIT 100`,
+      language: "sql",
+      maxWidth: "2xl",
+    },
+    cta: {
+      primary: {
+        text: "Request Access",
+        onClick: true,
+        showPlusIcon: false,
+      },
+      secondary: {
+        text: "View Docs",
+        link: "https://docs.helicone.ai/features/hql",
+      },
+    },
+  },
 } as const;
 
 export type EmptyStateFeatureKey = keyof typeof EMPTY_STATE_FEATURES;
@@ -273,7 +312,7 @@ const ShikiHighlightedCode: React.FC<{
     <div className="w-full overflow-hidden rounded-lg">
       <div
         className={`overflow-x-auto rounded-lg bg-[#24292e] p-4 text-left max-w-${maxWidth} mx-auto`}
-        dangerouslySetInnerHTML={{ __html: highlightedCode }}
+        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(highlightedCode) }}
       />
     </div>
   );

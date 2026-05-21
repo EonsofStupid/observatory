@@ -33,6 +33,19 @@ export const getMapperTypeFromHeliconeRequest = (
     return "tool";
   }
 
+  if (heliconeRequest.request_body?._type === "data") {
+    return "data";
+  }
+
+  if (heliconeRequest.request_referrer === "ai-gateway") {
+    const bodyMapping = heliconeRequest.ai_gateway_body_mapping;
+    if (bodyMapping === "RESPONSES") {
+      return "ai-gateway-responses";
+    } else if (bodyMapping === "OPENAI") {
+      return "ai-gateway-chat";
+    }
+  }
+
   // Check for OpenAI Assistant responses
   if (
     heliconeRequest.response_body?.object === "thread.run" ||
@@ -53,6 +66,7 @@ export const getMapperTypeFromHeliconeRequest = (
     path: heliconeRequest.request_path,
     isAssistant: isAssistantRequest(heliconeRequest),
     targetUrl: heliconeRequest.target_url,
+    requestReferrer: heliconeRequest.request_referrer,
   });
 };
 
@@ -62,12 +76,14 @@ export const getMapperType = ({
   path,
   isAssistant,
   targetUrl,
+  requestReferrer,
 }: {
   model: string;
   provider: Provider;
   path?: string | null;
   isAssistant?: boolean;
   targetUrl?: string | null;
+  requestReferrer?: string | null;
 }): MapperType => {
   if (
     targetUrl &&
@@ -99,6 +115,14 @@ export const getMapperType = ({
 
   if (model === "vector_db") {
     return "vector-db";
+  }
+
+  if (model.startsWith("tool:")) {
+    return "tool";
+  }
+
+  if (model.startsWith("data:")) {
+    return "data";
   }
 
   if (/^gpt-3\.5-turbo-instruct/.test(model)) {
@@ -166,7 +190,11 @@ export const getMapperType = ({
     return "gemini-chat";
   }
 
-  if (model === "dall-e-3" || model === "dall-e-2") {
+  if (
+    model === "dall-e-3" ||
+    model === "dall-e-2" ||
+    model.startsWith("gpt-image-1")
+  ) {
     return "openai-image";
   }
 

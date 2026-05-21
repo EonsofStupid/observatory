@@ -1,4 +1,4 @@
-import { costOfPrompt } from "@helicone-package/cost";
+import { modelCost } from "@helicone-package/cost/costCalc";
 import {
   HeliconeRequestResponseToPosthog,
   PostHogEvent,
@@ -18,21 +18,14 @@ export class PostHogHandler extends AbstractLogHandler {
   }
 
   public async handle(context: HandlerContext): PromiseGenericResult<string> {
+    const start = performance.now();
+    context.timingMetrics.push({
+      constructor: this.constructor.name,
+      start,
+    });
     if (!context.message.heliconeMeta.posthogApiKey) {
       return await super.handle(context);
     }
-
-    const usage = context.usage;
-
-    const cost = this.modelCost({
-      model: context.processedLog.model ?? "",
-      provider: context.message.log.request.provider ?? "",
-      sum_prompt_tokens: usage.promptTokens ?? 0,
-      sum_completion_tokens: usage.completionTokens ?? 0,
-      sum_tokens: (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0),
-    });
-
-    context.usage.cost = cost;
 
     const posthogProperties = this.mapPostHogLog(context);
 
@@ -52,9 +45,10 @@ export class PostHogHandler extends AbstractLogHandler {
         const posthogClient = new PosthogUserClient(event.apiKey, event.host);
 
         // Use Helicone-User-Id as distinct_id if available, else fallback to random UUID
-        const distinctId = event.properties.userId && event.properties.userId.trim() !== ""
-          ? event.properties.userId
-          : crypto.randomUUID();
+        const distinctId =
+          event.properties.userId && event.properties.userId.trim() !== ""
+            ? event.properties.userId
+            : crypto.randomUUID();
 
         posthogClient.captureEvent(
           "helicone_request_response",
@@ -80,7 +74,13 @@ export class PostHogHandler extends AbstractLogHandler {
     const response = context.message.log.response;
     const model = context.processedLog.model;
     const reqBody = context.processedLog.request.body;
-    const usage = context.usage;
+    const legacyUsage = context.legacyUsage;
+    const modelUsage = context.usage;
+
+    const promptTokens = modelUsage?.input ?? legacyUsage.promptTokens ?? 0;
+    const completionTokens =
+      modelUsage?.output ?? legacyUsage.completionTokens ?? 0;
+    const totalTokens = promptTokens + completionTokens;
 
     const posthogLog: HeliconeRequestResponseToPosthog = {
       model: model ?? "",
@@ -88,12 +88,12 @@ export class PostHogHandler extends AbstractLogHandler {
       n: reqBody.n ?? 0,
       promptId: request.promptId ?? "",
       timeToFirstToken: response.timeToFirstToken ?? 0,
-      cost: usage.cost ?? 0,
+      cost: context.costBreakdown?.totalCost ?? legacyUsage.cost ?? 0,
       provider: request.provider ?? "",
       path: request.path ?? "",
-      completetionTokens: usage.completionTokens ?? 0,
-      promptTokens: usage.promptTokens ?? 0,
-      totalTokens: (usage.completionTokens ?? 0) + (usage.promptTokens ?? 0),
+      completetionTokens: completionTokens,
+      promptTokens,
+      totalTokens,
       userId: request.userId ?? "",
       countryCode: request.countryCode ?? "",
       requestBodySize: request.bodySize ?? 0,
@@ -115,29 +115,5 @@ export class PostHogHandler extends AbstractLogHandler {
     };
 
     return posthogLog;
-  }
-
-  modelCost(modelRow: {
-    model: string;
-    provider: string;
-    sum_prompt_tokens: number;
-    sum_completion_tokens: number;
-    sum_tokens: number;
-  }): number {
-    const model = modelRow.model;
-    const promptTokens = modelRow.sum_prompt_tokens;
-    const completionTokens = modelRow.sum_completion_tokens;
-    return (
-      costOfPrompt({
-        model,
-        promptTokens,
-        completionTokens,
-        provider: modelRow.provider,
-        promptCacheWriteTokens: 0,
-        promptCacheReadTokens: 0,
-        promptAudioTokens: 0,
-        completionAudioTokens: 0,
-      }) ?? 0
-    );
   }
 }

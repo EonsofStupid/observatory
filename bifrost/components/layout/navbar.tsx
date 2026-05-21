@@ -12,19 +12,19 @@ import {
 import { cn } from "@/lib/utils";
 import {
   X,
-  Briefcase,
   Mail,
   BookHeart,
   ChevronRight,
   Scale,
   Newspaper,
-  Earth,
   ExternalLink,
   Gem,
   Github,
   GitMerge,
   HandCoins,
   TrendingUp,
+  BarChart3,
+  Bot,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -40,6 +40,7 @@ interface NavBarProps {
   stars?: number;
   featuredBlogMetadata: BlogStructureMetaData;
   featuredBlogFolderName?: string;
+  noMargin?: boolean;
 }
 
 const MobileHeader = (props: {
@@ -150,7 +151,7 @@ const MobileNav = () => {
       <div className="fixed inset-x-0 top-0 z-50 bg-background">
         <MobileHeader
           menuDispatch={[menuOpen, setMenuOpen]}
-          className="pl-2 pr-4"
+          className="pr-4"
         />
       </div>
       {menuOpen && (
@@ -207,8 +208,7 @@ const resourcesComponents: LinkItem[] = [
       href: "/customers",
       isExternal: false,
     },
-    description:
-      "Built for scale, security, and control",
+    description: "Built for scale, security, and control",
     icon: <Gem className="size-5 navbar-icon-style" />,
   },
   {
@@ -232,15 +232,6 @@ const resourcesComponents: LinkItem[] = [
 ];
 
 const toolsComponents: LinkItem[] = [
-  {
-    title: "Open Stats",
-    link: {
-      href: "/open-stats",
-      isExternal: false,
-    },
-    description: "Real-time LLM usage analytics",
-    icon: <Earth className="size-5 navbar-icon-style" />,
-  },
   {
     title: "Model Comparison",
     link: {
@@ -268,6 +259,15 @@ const toolsComponents: LinkItem[] = [
     description: "Calculate and compare API costs",
     icon: <HandCoins className="size-5 navbar-icon-style" />,
   },
+  {
+    title: "Agent Email Course",
+    link: {
+      href: "/agent-course",
+      isExternal: false,
+    },
+    description: "From Engineer to AI Engineer in 7 days",
+    icon: <Bot className="size-5 navbar-icon-style" />,
+  },
 ];
 
 const mainComponents: LinkItem[] = [
@@ -289,6 +289,24 @@ const mainComponents: LinkItem[] = [
     description: "Simple, transparent pricing",
     icon: <HandCoins className="size-5 navbar-icon-style" />,
   },
+  {
+    title: "Models",
+    link: {
+      href: "/models",
+      isExternal: false,
+    },
+    description: "Browse and compare AI models",
+    icon: <Scale className="size-5 navbar-icon-style" />,
+  },
+  // {
+  //   title: "Stats",
+  //   link: {
+  //     href: "/stats",
+  //     isExternal: false,
+  //   },
+  //   description: "View AI Gateway usage statistics",
+  //   icon: <BarChart3 className="size-5 navbar-icon-style" />,
+  // },
 ];
 
 const additionalComponents: LinkItem[] = [
@@ -300,15 +318,6 @@ const additionalComponents: LinkItem[] = [
     },
     description: "Get in touch with us",
     icon: <Mail className="size-5 navbar-icon-style" />,
-  },
-  {
-    title: "Careers",
-    link: {
-      href: "https://app.dover.com/jobs/helicone",
-      isExternal: true,
-    },
-    description: "Join our team",
-    icon: <Briefcase className="size-5 navbar-icon-style" />,
   },
   {
     title: "GitHub",
@@ -337,12 +346,12 @@ const NavBar = (props: NavBarProps) => {
   return (
     <div
       ref={headerRef}
-      className="bg-background top-0 sticky z-30 border-b border-border mb-10"
+      className={`bg-background top-0 sticky z-30 border-b border-border ${props.noMargin ? "" : "mb-10"}`}
     >
       <MobileNav />
 
       <nav
-        className="gap-x-3 mx-auto lg:flex sm:px-16 lg:px-24 2xl:px-40 max-w-[2000px] items-center py-2 hidden justify-between"
+        className="gap-x-3 mx-auto lg:flex lg:px-8 xl:px-16 2xl:px-40 max-w-[2000px] items-center py-2 hidden justify-between"
         aria-label="Global"
       >
         {/* Logo */}
@@ -390,6 +399,24 @@ const NavBar = (props: NavBarProps) => {
                 <Link href="/pricing" legacyBehavior passHref>
                   <NavigationMenuLink className={navigationMenuTriggerStyle()}>
                     Pricing
+                  </NavigationMenuLink>
+                </Link>
+              </NavigationMenuItem>
+
+              {/* Models */}
+              <NavigationMenuItem>
+                <Link href="/models" legacyBehavior passHref>
+                  <NavigationMenuLink className={navigationMenuTriggerStyle()}>
+                    Models
+                  </NavigationMenuLink>
+                </Link>
+              </NavigationMenuItem>
+
+              {/* Stats */}
+              <NavigationMenuItem>
+                <Link href="/stats" legacyBehavior passHref>
+                  <NavigationMenuLink className={navigationMenuTriggerStyle()}>
+                    Stats
                   </NavigationMenuLink>
                 </Link>
               </NavigationMenuItem>
@@ -462,18 +489,6 @@ const NavBar = (props: NavBarProps) => {
                 </NavigationMenuContent>
               </NavigationMenuItem>
 
-              {/* Careers */}
-              <NavigationMenuItem>
-                <Link
-                  href="https://app.dover.com/jobs/helicone"
-                  legacyBehavior
-                  passHref
-                >
-                  <NavigationMenuLink className={navigationMenuTriggerStyle()}>
-                    Careers
-                  </NavigationMenuLink>
-                </Link>
-              </NavigationMenuItem>
             </NavigationMenuList>
           </NavigationMenu>
 
@@ -502,9 +517,9 @@ const NavBar = (props: NavBarProps) => {
                 <p className="text-sm text-accent-foreground">
                   {props.stars
                     ? props.stars.toLocaleString("en-US", {
-                      notation: "compact",
-                      compactDisplay: "short",
-                    })
+                        notation: "compact",
+                        compactDisplay: "short",
+                      })
                     : "0"}
                 </p>
               </Button>

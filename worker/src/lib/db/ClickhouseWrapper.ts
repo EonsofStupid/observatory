@@ -94,7 +94,7 @@ export class ClickhouseClientWrapper {
       });
       return { data: await queryResult.json<T[]>(), error: null };
     } catch (err) {
-      console.error("Error executing query: ", query, parameters);
+      console.error("Error executing query: ", query);
       console.error(err);
       return {
         data: null,
@@ -212,6 +212,7 @@ export interface RequestResponseRMT {
   prompt_cache_read_tokens: number;
   prompt_audio_tokens: number;
   completion_audio_tokens: number;
+  reasoning_tokens: number;
   model: string;
   request_id: string;
   request_created_at: string;
@@ -231,6 +232,7 @@ export interface RequestResponseRMT {
   updated_at?: string;
   cache_reference_id?: string;
   cache_enabled: boolean;
+  ai_gateway_body_mapping: string;
 }
 
 export interface ClickhouseDB {

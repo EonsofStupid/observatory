@@ -1,8 +1,8 @@
 import { Small } from "@/components/ui/typography";
-import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { BookOpen, Plus } from "lucide-react";
 import { logger } from "@/lib/telemetry/logger";
+import { EmptyStateCard } from "@/components/shared/helicone/EmptyStateCard";
 
 import FoldedHeader from "@/components/shared/FoldedHeader";
 import {
@@ -14,10 +14,12 @@ import {
   useGetPromptsWithVersions,
   useGetPromptVersions,
   useSetPromptVersionEnvironment,
+  useRemoveEnvironmentFromVersion,
   useGetPromptTags,
   useDeletePrompt,
   useDeletePromptVersion,
   useRenamePrompt,
+  useUpdatePromptTags,
 } from "@/services/hooks/prompts";
 import { useState, useEffect, useRef } from "react";
 import PromptDetails from "./PromptDetails";
@@ -26,19 +28,20 @@ import { Search } from "lucide-react";
 import type { PromptWithVersions } from "@/services/hooks/prompts";
 import LoadingAnimation from "@/components/shared/loadingAnimation";
 import TableFooter from "../requests/tableFooter";
-import router from "next/router";
+import { useRouter } from "next/router";
 import useNotification from "@/components/shared/notification/useNotification";
 import { SimpleTable } from "@/components/shared/table/simpleTable";
 import { useLocalStorage } from "@/services/hooks/localStorage";
 import { getInitialColumns } from "./initialColumns";
 import TagsFilter from "./TagsFilter";
+import { useHeliconeAgent } from "@/components/templates/agent/HeliconeAgentContext";
 
 interface PromptsPageProps {
   defaultIndex: number;
-  showLegacyBanner?: boolean;
 }
 
 const PromptsPage = (props: PromptsPageProps) => {
+  const router = useRouter();
   const [search, setSearch] = useState("");
   const [selectedPrompt, setSelectedPrompt] =
     useState<PromptWithVersions | null>(null);
@@ -54,6 +57,10 @@ const PromptsPage = (props: PromptsPageProps) => {
   const { setNotification } = useNotification();
   const drawerRef = useRef<any>(null);
   const [drawerSize, setDrawerSize] = useLocalStorage("prompt-drawer-size", 40);
+  const { setToolHandler } = useHeliconeAgent();
+
+  // Get promptId from URL query params for deep linking from requests page
+  const urlPromptId = Array.isArray(router.query.promptId) ? router.query.promptId[0] : router.query.promptId;
 
   const { data: tags = [], isLoading: isLoadingTags } = useGetPromptTags();
   const { data, isLoading } = useGetPromptsWithVersions(
@@ -76,6 +83,18 @@ const PromptsPage = (props: PromptsPageProps) => {
     }
   }, [prompts, selectedPrompt?.prompt.id]);
 
+  // Handle deep linking from requests page via promptId query param
+  useEffect(() => {
+    if (urlPromptId && prompts.length > 0 && !selectedPrompt) {
+      const promptToSelect = prompts.find((p) => p.prompt.id === urlPromptId);
+      if (promptToSelect) {
+        setSelectedPrompt(promptToSelect);
+        setFilteredMajorVersion(null);
+        drawerRef.current?.expand();
+      }
+    }
+  }, [urlPromptId, prompts, selectedPrompt]);
+
   const { data: filteredVersions, isLoading: isLoadingFilteredVersions } =
     useGetPromptVersions(
       selectedPrompt?.prompt.id || "",
@@ -95,9 +114,11 @@ const PromptsPage = (props: PromptsPageProps) => {
   };
 
   const setEnvironment = useSetPromptVersionEnvironment();
+  const removeEnvironment = useRemoveEnvironmentFromVersion();
   const deletePrompt = useDeletePrompt();
   const deletePromptVersion = useDeletePromptVersion();
   const renamePrompt = useRenamePrompt();
+  const updatePromptTags = useUpdatePromptTags();
 
   const handleRenamePrompt = async (promptId: string, newName: string) => {
     logger.info({ promptId, newName }, "Renaming prompt");
@@ -123,7 +144,58 @@ const PromptsPage = (props: PromptsPageProps) => {
     }
   };
 
-  const handleSetPromptVersionEnvironment = async (
+  const handleUpdatePromptTags = async (
+    promptId: string,
+    tags: string[],
+  ): Promise<boolean> => {
+    logger.info({ promptId, tags }, "Updating prompt tags");
+    try {
+      const result = await updatePromptTags.mutateAsync({
+        params: {
+          path: {
+            promptId,
+          },
+        },
+        body: {
+          tags,
+        },
+      });
+
+      if (result.error) {
+        setNotification("Error updating tags", "error");
+        logger.error(
+          { error: result.error, promptId, tags },
+          "Error updating tags",
+        );
+        return false;
+      }
+
+      const updatedTags = result.data ?? tags;
+
+      if (selectedPrompt?.prompt.id === promptId) {
+        setSelectedPrompt((prev) =>
+          prev
+            ? {
+                ...prev,
+                prompt: {
+                  ...prev.prompt,
+                  tags: updatedTags,
+                },
+              }
+            : prev,
+        );
+      }
+
+      setNotification("Tags updated", "success");
+      return true;
+    } catch (error) {
+      setNotification("Error updating tags", "error");
+      logger.error({ error, promptId, tags }, "Error updating tags");
+      return false;
+    }
+  };
+
+  const handleSetEnvironment = async (
     promptId: string,
     promptVersionId: string,
     environment: string,
@@ -143,7 +215,31 @@ const PromptsPage = (props: PromptsPageProps) => {
         "Error setting environment",
       );
     } else {
-      setNotification("Environment set successfully", "success");
+      setNotification(`Environment "${environment}" set`, "success");
+    }
+  };
+
+  const handleRemoveEnvironment = async (
+    promptId: string,
+    promptVersionId: string,
+    environment: string,
+  ) => {
+    const result = await removeEnvironment.mutateAsync({
+      body: {
+        promptId,
+        promptVersionId,
+        environment,
+      },
+    });
+
+    if (result.error) {
+      setNotification("Error removing environment", "error");
+      logger.error(
+        { error: result.error, promptId, promptVersionId, environment },
+        "Error removing environment",
+      );
+    } else {
+      setNotification(`Environment "${environment}" removed`, "success");
     }
   };
 
@@ -269,6 +365,72 @@ const PromptsPage = (props: PromptsPageProps) => {
 
   const columns = getInitialColumns(handlePlaygroundActionClick);
 
+  useEffect(() => {
+    setToolHandler("prompts-search", async (args: { query: string }) => {
+      setSearch(args.query);
+      return {
+        success: true,
+        message: `Successfully searched for prompts: "${args.query}"`,
+      };
+    });
+
+    setToolHandler("prompts-get", async () => {
+      const promptInfo = prompts.map((prompt) => {
+        return `Name: ${prompt.prompt.name} (ID: ${prompt.prompt.id})\n}`;
+      });
+      return {
+        success: true,
+        message: "PROMPTS: " + JSON.stringify(promptInfo),
+      };
+    });
+
+    setToolHandler("prompts-select", async (args: { id: string }) => {
+      const prompt = prompts.find((p) => p.prompt.id === args.id);
+      if (prompt) {
+        handleRowSelect(prompt);
+        return {
+          success: true,
+          message: `Successfully selected prompt: ${prompt.prompt.name} (${prompt.prompt.id})`,
+        };
+      }
+      return {
+        success: false,
+        message: `Prompt does not exist with ID ${args.id}`,
+      };
+    });
+
+    setToolHandler("prompts-get_versions", async (args: { id: string }) => {
+      const prompt = prompts.find((p) => p.prompt.id === args.id);
+      if (prompt) {
+        const promptVersions = prompt.versions.map((version) => {
+          return `
+          Version: ${version.major_version}.${version.minor_version} (ID: ${version.id})
+          Environments: ${version.environments?.join(", ") || "none"}
+          Commit Message: ${version.commit_message}\n
+          `;
+        });
+        return {
+          success: true,
+          message: `PROMPT VERSIONS: ${JSON.stringify(promptVersions)}`,
+        };
+      }
+      return {
+        success: false,
+        message: `Prompt does not exist with ID ${args.id}`,
+      };
+    });
+  }, [prompts]);
+
+  // Check if we should show empty state
+  if (!isLoading && !isLoadingTags && prompts.length === 0) {
+    return (
+      <EmptyStateCard
+        feature="prompts"
+        onPrimaryClick={() => router.push("/playground?createPrompt=true")}
+      />
+    );
+  }
+
   return (
     <main className="flex h-screen w-full animate-fade-in flex-col">
       <FoldedHeader
@@ -296,24 +458,6 @@ const PromptsPage = (props: PromptsPageProps) => {
         }
       />
 
-      {props.showLegacyBanner && (
-        <section className="w-full p-4">
-          <div className="w-full rounded-lg border border-blue-300 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-200">
-            🎉 You are viewing our revamped Prompts experience, offering prompt
-            versioning and composability with the Playground and AI Gateway!{" "}
-            <br />
-            <span className="font-medium">
-              The legacy prompts will be deprecated on <i>August 20th, 2025</i>.
-            </span>{" "}
-            <Link
-              href="/prompts?legacy=true"
-              className="font-medium underline hover:no-underline"
-            >
-              See the old prompts here →
-            </Link>
-          </div>
-        </section>
-      )}
       <div className="flex h-full min-h-[80vh] w-full flex-col border-t border-border">
         <ResizablePanelGroup direction="horizontal">
           <ResizablePanel>
@@ -363,6 +507,7 @@ const PromptsPage = (props: PromptsPageProps) => {
                     currentSortKey={sortKey}
                     currentSortDirection={sortDirection}
                     className="h-full"
+                    tableId="prompts-table"
                   />
                 )}
               </div>
@@ -402,7 +547,9 @@ const PromptsPage = (props: PromptsPageProps) => {
           >
             <PromptDetails
               onRenamePrompt={handleRenamePrompt}
-              onSetEnvironment={handleSetPromptVersionEnvironment}
+              onUpdatePromptTags={handleUpdatePromptTags}
+              onSetEnvironment={handleSetEnvironment}
+              onRemoveEnvironment={handleRemoveEnvironment}
               onOpenPromptVersion={handleOpenPromptVersion}
               onDeletePrompt={handleDeletePrompt}
               onDeletePromptVersion={handleDeletePromptVersion}

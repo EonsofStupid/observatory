@@ -120,4 +120,56 @@ export const costs: ModelRow[] = [
       completion_audio_token: 0.00002,
     },
   },
+  {
+    model: {
+      operator: "equals",
+      value: "gpt-4o-mini",
+    },
+    cost: {
+      prompt_token: 0.0000002,
+      completion_token: 0.0000006,
+      prompt_cache_read_token: 0.0000001,
+    },
+  },
+  {
+    model: {
+      operator: "equals",
+      value: "gpt-4o-mini-2024-07-18",
+    },
+    cost: {
+      prompt_token: 0.0000002,
+      completion_token: 0.0000006,
+      prompt_cache_read_token: 0.0000001,
+    },
+  },
+  {
+    model: {
+      operator: "equals",
+      value: "text-embedding-3-large",
+    },
+    cost: {
+      prompt_token: 0.00000014,
+      completion_token: 0.0,
+    },
+  },
+  {
+    model: {
+      operator: "includes",
+      value: "grok-3",
+    },
+    cost: {
+      prompt_token: 0.000003,
+      completion_token: 0.000015,
+    },
+  },
+  {
+    model: {
+      operator: "includes",
+      value: "grok-3-mini",
+    },
+    cost: {
+      prompt_token: 0.00000025,
+      completion_token: 0.00000127,
+    },
+  },
 ];

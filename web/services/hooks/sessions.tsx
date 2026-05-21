@@ -2,18 +2,25 @@ import { useQuery } from "@tanstack/react-query";
 import { useOrg } from "../../components/layout/org/organizationContext";
 import { getJawnClient } from "../../lib/clients/jawn";
 import { useFilterAST } from "@/filterAST/context/filterContext";
-import { toFilterNode } from "@/filterAST/toFilterNode";
-import { FilterExpression } from "@/filterAST/filterAst";
+import { toFilterNode } from "@helicone-package/filters/toFilterNode";
+import { FilterExpression } from "@helicone-package/filters/types";
+import { FilterLeaf } from "@helicone-package/filters/filterDefs";
 import { TimeFilter } from "@/types/timeFilter";
 
 const useSessions = ({
   timeFilter,
   sessionIdSearch,
   selectedName,
+  page = 1,
+  pageSize = 50,
+  isLive = false,
 }: {
   timeFilter: TimeFilter;
   sessionIdSearch: string;
   selectedName?: string;
+  page?: number;
+  pageSize?: number;
+  isLive?: boolean;
 }) => {
   const org = useOrg();
   const filterStore = useFilterAST();
@@ -25,6 +32,8 @@ const useSessions = ({
       sessionIdSearch,
       selectedName,
       filterStore.store.filter,
+      page,
+      pageSize,
     ],
     queryFn: async (query) => {
       const orgId = query.queryKey[1] as string;
@@ -45,7 +54,84 @@ const useSessions = ({
           },
           nameEquals: nameEquals ?? "",
           timezoneDifference: 0,
-          filter: filter ? (toFilterNode(filter) as any) : "all",
+          filter: filter ? (toFilterNode(filter) as any) : ({} as FilterLeaf),
+          offset: (page - 1) * pageSize,
+          limit: pageSize,
+        },
+      });
+      if (result.error || result.data.error) {
+        throw new Error(result.error || result.data.error || "Unknown error");
+      }
+      return result;
+    },
+    refetchOnWindowFocus: false,
+    retry: 2,
+    refetchIntervalInBackground: false,
+    refetchInterval: isLive ? 2000 : false,
+  });
+  const properties = useQuery({
+    queryKey: ["/v1/property/query", org?.currentOrg?.id],
+    queryFn: async (query) => {
+      const jawn = getJawnClient(query.queryKey[1]);
+      const res = await jawn.POST("/v1/property/query", {
+        body: {},
+      });
+      return res.data;
+    },
+    refetchOnWindowFocus: false,
+  });
+
+  return {
+    sessions: data?.data?.data || [],
+    refetch,
+    isLoading: isLoading || properties.isLoading,
+    isRefetching,
+    hasSessions: !!properties.data?.data?.find((p) =>
+      p.property.toLowerCase().includes("helicone-session"),
+    ),
+  };
+};
+
+const useSessionsAggregateMetrics = ({
+  timeFilter,
+  sessionIdSearch,
+  selectedName,
+}: {
+  timeFilter: TimeFilter;
+  sessionIdSearch: string;
+  selectedName?: string;
+}) => {
+  const org = useOrg();
+  const filterStore = useFilterAST();
+  const { data, isLoading, refetch, isRefetching } = useQuery({
+    queryKey: [
+      "sessions-count",
+      org?.currentOrg?.id,
+      timeFilter,
+      sessionIdSearch,
+      selectedName,
+      filterStore.store.filter,
+    ],
+    queryFn: async (query) => {
+      const orgId = query.queryKey[1] as string;
+      const timeFilter = query.queryKey[2] as TimeFilter;
+
+      const sessionIdSearch = query.queryKey[3] as string;
+      const nameEquals = query.queryKey[4] as string;
+
+      const filter = query.queryKey[5] as FilterExpression;
+      const jawnClient = getJawnClient(orgId);
+
+      const result = await jawnClient.POST("/v1/session/count", {
+        body: {
+          search: sessionIdSearch ?? "",
+          timeFilter: {
+            endTimeUnixMs: timeFilter.end.getTime(),
+            startTimeUnixMs: timeFilter.start.getTime(),
+          },
+          nameEquals: nameEquals ?? "",
+          timezoneDifference: 0,
+          filter: filter ? (toFilterNode(filter) as any) : ({} as FilterLeaf),
         },
       });
       if (result.error || result.data.error) {
@@ -60,17 +146,10 @@ const useSessions = ({
   });
 
   return {
-    sessions: data?.data?.data || [],
+    aggregateMetrics: data?.data?.data,
     refetch,
     isLoading,
     isRefetching,
-    hasSessions: useQuery({
-      queryKey: ["has-sessions", org?.currentOrg?.id],
-      queryFn: async () => {
-        const jawnClient = getJawnClient(org?.currentOrg?.id);
-        return await jawnClient.GET("/v1/session/has-session");
-      },
-    }),
   };
 };
 
@@ -106,7 +185,7 @@ const useSessionNames = (
                 startTimeUnixMs: timeFilter.start.getTime(),
               }
             : undefined,
-          filter: filter ? (toFilterNode(filter) as any) : "all",
+          filter: filter ? (toFilterNode(filter) as any) : ({} as FilterLeaf),
         },
       });
       if (result.error || result.data.error) {
@@ -172,7 +251,7 @@ const useSessionMetrics = (
             endTimeUnixMs: timeFilter.end.getTime(),
             startTimeUnixMs: timeFilter.start.getTime(),
           },
-          filter: filter ? (toFilterNode(filter) as any) : "all",
+          filter: filter ? (toFilterNode(filter) as any) : ({} as FilterLeaf),
         },
       });
       if (result.error || result.data.error) {
@@ -213,4 +292,5 @@ export {
   useSessionMetrics,
   useSessionNames,
   useSessions,
+  useSessionsAggregateMetrics,
 };

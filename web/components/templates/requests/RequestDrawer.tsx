@@ -15,6 +15,7 @@ import { useLocalStorage } from "@/services/hooks/localStorage";
 import { formatDate } from "@/utils/date";
 import { useQuery } from "@tanstack/react-query";
 import {
+  CreditCard,
   Eye,
   ListTreeIcon,
   ScrollTextIcon,
@@ -52,6 +53,7 @@ import { getUSDateFromString } from "@/components/shared/utils/utils";
 import { JsonRenderer } from "./components/chatComponent/single/JsonRenderer";
 import { useGetPromptVersion } from "@/services/hooks/prompts";
 import PromptVersionPill from "@/components/templates/prompts2025/PromptVersionPill";
+import { EMPTY_SESSION_NAME } from "../sessions/sessionId/SessionContent";
 
 const RequestDescTooltip = (props: {
   displayText: string;
@@ -155,6 +157,24 @@ export default function RequestDrawer(props: RequestDivProps) {
     request?.id || "",
   );
 
+  // Sanitizes Target URL if API key is used as a query parameter
+  const sanitizeTargetUrl = useCallback((url: string) => {
+    try {
+      const parsed = new URL(url);
+      const keyParam = parsed.searchParams.get("key");
+      if (keyParam) {
+        const masked = keyParam.startsWith("AI")
+          ? `${keyParam.slice(0, 3)}...`
+          : `${keyParam.slice(0, 1)}...`;
+        parsed.searchParams.set("key", masked);
+        return parsed.toString();
+      }
+    } catch {
+      // Fall through to return the original URL if parsing fails
+    }
+    return url;
+  }, []);
+
   // BACKWARDS COMPATABILITY FOR OLD PROMPTS
   const legacyPromptId = useMemo(
     () =>
@@ -187,6 +207,8 @@ export default function RequestDrawer(props: RequestDivProps) {
   /* -------------------------------------------------------------------------- */
   const isChatRequest = useMemo(
     () =>
+      request?._type === "ai-gateway-chat" ||
+      request?._type === "ai-gateway-responses" ||
       request?._type === "openai-chat" ||
       request?._type === "anthropic-chat" ||
       request?._type === "gemini-chat",
@@ -234,6 +256,15 @@ export default function RequestDrawer(props: RequestDivProps) {
       { label: "User", value: request.heliconeMetadata.user || "Unknown" },
     ];
 
+    if (request.heliconeMetadata.targetUrl) {
+      const safeUrl = sanitizeTargetUrl(request.heliconeMetadata.targetUrl);
+      requestInfo.push({
+        label: "Target URL",
+        value: safeUrl,
+        fullValue: safeUrl,
+      });
+    }
+
     // Token Information
     const tokenInfo = [
       {
@@ -250,29 +281,29 @@ export default function RequestDrawer(props: RequestDivProps) {
       },
       ...(request.heliconeMetadata.path
         ? [
-            {
-              label: "Path",
-              value: request.heliconeMetadata.path,
-            },
-          ]
+          {
+            label: "Path",
+            value: request.heliconeMetadata.path,
+          },
+        ]
         : []),
       ...(request.heliconeMetadata.promptCacheReadTokens &&
-      request.heliconeMetadata.promptCacheReadTokens > 0
+        request.heliconeMetadata.promptCacheReadTokens > 0
         ? [
-            {
-              label: "Prompt Cache Read Tokens",
-              value: request.heliconeMetadata.promptCacheReadTokens || 0,
-            },
-          ]
+          {
+            label: "Prompt Cache Read Tokens",
+            value: request.heliconeMetadata.promptCacheReadTokens || 0,
+          },
+        ]
         : []),
       ...(request.heliconeMetadata.promptCacheWriteTokens &&
-      request.heliconeMetadata.promptCacheWriteTokens > 0
+        request.heliconeMetadata.promptCacheWriteTokens > 0
         ? [
-            {
-              label: "Prompt Cache Write Tokens",
-              value: request.heliconeMetadata.promptCacheWriteTokens || 0,
-            },
-          ]
+          {
+            label: "Prompt Cache Write Tokens",
+            value: request.heliconeMetadata.promptCacheWriteTokens || 0,
+          },
+        ]
         : []),
     ];
 
@@ -378,7 +409,7 @@ export default function RequestDrawer(props: RequestDivProps) {
       gatewayRouterId: request?.heliconeMetadata.gatewayRouterId ?? undefined,
       gatewayDeploymentTarget:
         request?.heliconeMetadata.gatewayDeploymentTarget ?? undefined,
-    };
+    } as Record<string, string | undefined>;
   }, [request?.heliconeMetadata.customProperties, newPromptId]);
 
   // Get current request Properties and Scores
@@ -404,6 +435,55 @@ export default function RequestDrawer(props: RequestDivProps) {
     () => (request?.heliconeMetadata.scores as Record<string, number>) || {},
     [request?.heliconeMetadata.scores],
   );
+
+  // Extract Stripe integration properties
+  const stripeProperties = useMemo(() => {
+    const props = request?.heliconeMetadata.customProperties;
+    if (!props) return null;
+
+    return {
+      status: props["helicone-stripe-integration-status"] as string | undefined,
+      skipReason: props["helicone-stripe-skip-reason"] as string | undefined,
+      customerId: props["helicone-stripe-customer-id"] as string | undefined,
+      model: props["helicone-stripe-model"] as string | undefined,
+      attemptedModel: props["helicone-stripe-attempted-model"] as
+        | string
+        | undefined,
+    };
+  }, [request?.heliconeMetadata.customProperties]);
+
+  const hasStripeData = useMemo(() => {
+    return (
+      stripeProperties &&
+      Object.values(stripeProperties).some((v) => v !== undefined)
+    );
+  }, [stripeProperties]);
+
+  // Helper functions for Stripe integration status
+  const getStripeStatusColor = (status: string) => {
+    switch (status) {
+      case "processed":
+        return "bg-green-50 dark:bg-green-900 text-green-700 dark:text-green-300 ring-1 ring-inset ring-green-600/20";
+      case "skipped":
+        return "bg-yellow-50 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 ring-1 ring-inset ring-yellow-600/20";
+      case "error":
+        return "bg-red-50 dark:bg-red-900 text-red-700 dark:text-red-300 ring-1 ring-inset ring-red-600/20";
+      default:
+        return "bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300 ring-1 ring-inset ring-gray-600/20";
+    }
+  };
+
+  const formatSkipReason = (reason: string) => {
+    const reasonMap: Record<string, string> = {
+      "cache-hit": "Cache Hit",
+      "no-customer-id": "No Customer ID",
+      "model-not-whitelisted": "Model Not Whitelisted",
+      "max-events-exceeded": "Max Events Exceeded",
+      "zero-tokens": "Zero Tokens",
+    };
+    return reasonMap[reason] || reason;
+  };
+
   // Handlers for adding properties and scores
   const onAddPropertyHandler = useCallback(
     async (key: string, value: string) => {
@@ -592,6 +672,26 @@ export default function RequestDrawer(props: RequestDivProps) {
                 errorCode={request.heliconeMetadata.status.code}
               />
 
+              {/* AI Gateway Badge */}
+              {request.heliconeMetadata.requestReferrer === "ai-gateway" && (
+                <TooltipProvider>
+                  <Tooltip delayDuration={100}>
+                    <TooltipTrigger asChild>
+                      <Badge
+                        variant={"secondary"}
+                        asPill={false}
+                        className="border border-border"
+                      >
+                        <ShuffleIcon className="h-3 w-3" />
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="text-xs">
+                      AI Gateway Request
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+
               {/* Show more Parameters Button */}
               <TooltipProvider>
                 <Tooltip delayDuration={100}>
@@ -636,17 +736,18 @@ export default function RequestDrawer(props: RequestDivProps) {
               )}
 
               {/* Session */}
-              {specialProperties.sessionId && specialProperties.sessionName && (
+              {specialProperties.sessionId && (
                 <RequestDescTooltip
                   displayText={
                     specialProperties.sessionPath ??
-                    specialProperties.sessionName
+                    specialProperties.sessionName ??
+                    specialProperties.sessionId
                   }
                   icon={<ListTreeIcon className="h-4 w-4" />}
                   copyText={specialProperties.sessionId}
                   href={`/sessions/${encodeURIComponent(
-                    specialProperties.sessionName,
-                  )}/${specialProperties.sessionId}`}
+                    specialProperties.sessionName ?? EMPTY_SESSION_NAME,
+                  )}/${encodeURIComponent(specialProperties.sessionId)}`}
                   truncateLength={dynamicTruncateLength}
                 />
               )}
@@ -661,8 +762,8 @@ export default function RequestDrawer(props: RequestDivProps) {
                   icon={<ScrollTextIcon className="h-4 w-4" />}
                   copyText={specialProperties.promptId}
                   href={
-                    newPromptId
-                      ? `/prompts`
+                    newPromptVersionId
+                      ? `/prompts?promptId=${newPromptId}`
                       : `/prompts/${promptDataQuery.data?.id}`
                   }
                   truncateLength={dynamicTruncateLength}
@@ -697,29 +798,7 @@ export default function RequestDrawer(props: RequestDivProps) {
                         {item.label}
                       </XSmall>
 
-                      {item.label === "Request ID" || item.label === "User" ? (
-                        <TooltipProvider>
-                          <Tooltip delayDuration={100}>
-                            <TooltipTrigger asChild>
-                              <p
-                                className="min-w-0 cursor-pointer truncate text-right text-xs"
-                                onClick={() => {
-                                  navigator.clipboard.writeText(item.value);
-                                  setNotification(
-                                    "Request ID copied",
-                                    "success",
-                                  );
-                                }}
-                              >
-                                {item.value}
-                              </p>
-                            </TooltipTrigger>
-                            <TooltipContent side="bottom" className="text-xs">
-                              Copy
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      ) : item.label === "Created At" ? (
+                      {item.label === "Created At" ? (
                         <TooltipProvider>
                           <Tooltip delayDuration={100}>
                             <TooltipTrigger asChild>
@@ -733,9 +812,30 @@ export default function RequestDrawer(props: RequestDivProps) {
                           </Tooltip>
                         </TooltipProvider>
                       ) : (
-                        <p className="min-w-0 truncate text-right text-xs">
-                          {item.value}
-                        </p>
+                        <TooltipProvider>
+                          <Tooltip delayDuration={100}>
+                            <TooltipTrigger asChild>
+                              <p
+                                className="min-w-0 cursor-pointer truncate text-right text-xs"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(item.value);
+                                  setNotification(
+                                    `${item.label} copied`,
+                                    "success",
+                                  );
+                                }}
+                              >
+                                {item.value}
+                              </p>
+                            </TooltipTrigger>
+                            <TooltipContent
+                              side="bottom"
+                              className="max-w-md break-all text-xs"
+                            >
+                              Copy: {item.value}
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       )}
                     </div>
                   ))}
@@ -831,9 +931,9 @@ export default function RequestDrawer(props: RequestDivProps) {
                         <span className="text-sm font-medium text-muted-foreground">
                           {currentPromptData.data.prompt.name.length > 15
                             ? currentPromptData.data.prompt.name.substring(
-                                0,
-                                12,
-                              ) + "..."
+                              0,
+                              12,
+                            ) + "..."
                             : currentPromptData.data.prompt.name}
                         </span>
                       </>
@@ -868,6 +968,76 @@ export default function RequestDrawer(props: RequestDivProps) {
                       JSON.stringify(promptInputsQuery.data?.inputs),
                     )}
                   />
+                </div>
+              </div>
+            )}
+
+            {/* Stripe Integration Status */}
+            {hasStripeData && stripeProperties && (
+              <div className="mb-4 rounded-lg border border-border bg-sidebar-background p-3">
+                <div className="mb-2 flex items-center gap-2">
+                  <CreditCard size={14} className="text-primary" />
+                  <h2 className="text-xs font-medium">Stripe Integration</h2>
+                  {stripeProperties.status && (
+                    <>
+                      <div className="h-3 w-px bg-border" />
+                      <Badge
+                        variant="outline"
+                        className={getStripeStatusColor(
+                          stripeProperties.status,
+                        )}
+                      >
+                        {stripeProperties.status === "processed"
+                          ? "Processed"
+                          : stripeProperties.status === "skipped"
+                            ? "Skipped"
+                            : "Error"}
+                      </Badge>
+                    </>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  {stripeProperties.skipReason && (
+                    <div className="grid grid-cols-[auto,1fr] items-center gap-x-3">
+                      <XSmall className="text-nowrap text-muted-foreground">
+                        Reason
+                      </XSmall>
+                      <XSmall className="min-w-0 text-right">
+                        {formatSkipReason(stripeProperties.skipReason)}
+                      </XSmall>
+                    </div>
+                  )}
+                  {stripeProperties.customerId && (
+                    <div className="grid grid-cols-[auto,1fr] items-center gap-x-3">
+                      <XSmall className="text-nowrap text-muted-foreground">
+                        Customer
+                      </XSmall>
+                      <XSmall className="font-mono min-w-0 truncate text-right">
+                        {stripeProperties.customerId}
+                      </XSmall>
+                    </div>
+                  )}
+                  {stripeProperties.model && (
+                    <div className="grid grid-cols-[auto,1fr] items-center gap-x-3">
+                      <XSmall className="text-nowrap text-muted-foreground">
+                        Model
+                      </XSmall>
+                      <XSmall className="font-mono min-w-0 truncate text-right">
+                        {stripeProperties.model}
+                      </XSmall>
+                    </div>
+                  )}
+                  {stripeProperties.attemptedModel && (
+                    <div className="grid grid-cols-[auto,1fr] items-center gap-x-3">
+                      <XSmall className="text-nowrap text-muted-foreground">
+                        Attempted
+                      </XSmall>
+                      <XSmall className="font-mono min-w-0 truncate text-right">
+                        {stripeProperties.attemptedModel}
+                      </XSmall>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -943,12 +1113,12 @@ export default function RequestDrawer(props: RequestDivProps) {
               type="request"
               defaultValue={
                 request.heliconeMetadata.scores &&
-                request.heliconeMetadata.scores["helicone-score-feedback"]
+                  request.heliconeMetadata.scores["helicone-score-feedback"]
                   ? Number(
-                      request.heliconeMetadata.scores[
-                        "helicone-score-feedback"
-                      ],
-                    ) === 1
+                    request.heliconeMetadata.scores[
+                    "helicone-score-feedback"
+                    ],
+                  ) === 1
                     ? true
                     : false
                   : null

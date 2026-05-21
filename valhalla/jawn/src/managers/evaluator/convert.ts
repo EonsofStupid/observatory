@@ -30,6 +30,7 @@ export const convertTestInputToHeliconeRequest = (
     total_tokens: null,
     prompt_tokens: null,
     completion_tokens: null,
+    reasoning_tokens: null,
     prompt_cache_write_tokens: null,
     prompt_cache_read_tokens: null,
     prompt_id: null,
@@ -41,5 +42,8 @@ export const convertTestInputToHeliconeRequest = (
     target_url: "",
     prompt_audio_tokens: null,
     completion_audio_tokens: null,
+    cost: null,
+    prompt_version: null,
+    ai_gateway_body_mapping: null,
   };
 };

@@ -1,3 +1,6 @@
+// This class handles the logging of requests and responses to various storage backends
+// including Postgres, S3, and Clickhouse. It maps incoming log data to the appropriate
+// database schemas and manages batch processing for efficiency.
 import { heliconeRequestToMappedContent } from "@helicone-package/llm-mapper/utils/getMappedContent";
 import {
   CacheMetricSMT,
@@ -21,27 +24,77 @@ import {
   HandlerContext,
   PromptRecord,
   toHeliconeRequest,
+  getPromptTokens,
+  getCompletionTokens,
+  getPromptCacheWriteTokens,
+  getPromptCacheReadTokens,
+  getPromptAudioTokens,
+  getCompletionAudioTokens,
+  getReasoningTokens,
 } from "./HandlerContext";
 import { DEFAULT_UUID } from "@helicone-package/llm-mapper/types";
-import {
-  COST_PRECISION_MULTIPLIER,
-  modelCost,
-} from "@helicone-package/cost/costCalc";
+import { COST_PRECISION_MULTIPLIER } from "@helicone-package/cost/costCalc";
+import { atLeastZero } from "../utils/helicone_math";
+import { tryToGetSize } from "../../utils/tryGetSize";
+import { replaceLoneSurrogates } from "../../utils/sanitize";
 
-type S3Record = {
+type RequestRecord = {
   requestId: string;
   organizationId: string;
   requestBody: string;
   responseBody: string;
-  assets: Map<string, string>;
+  location: "s3" | "clickhouse" | "not_stored_exceeded_free";
 };
 
+// Legacy type definitions for deleted tables
+export interface ResponseInsert {
+  id: string;
+  request: string;
+  helicone_org_id: string | null;
+  status: number | null;
+  model: string | null | undefined;
+  completion_tokens: number | null | undefined;
+  prompt_tokens: number | null | undefined;
+  prompt_cache_write_tokens?: number | null | undefined;
+  prompt_cache_read_tokens?: number | null | undefined;
+  time_to_first_token: number | null | undefined;
+  delay_ms: number | null | undefined;
+  created_at: string;
+}
+
+export interface RequestInsert {
+  id: string;
+  path: string;
+  auth_hash: string;
+  user_id: string | null;
+  prompt_id: string | null;
+  properties: Record<string, string>;
+  helicone_user: string | null;
+  helicone_api_key_id: number | null;
+  helicone_org_id: string | null;
+  provider: string;
+  helicone_proxy_key_id: string | null;
+  model: string | null | undefined;
+  model_override: string | null;
+  threat: boolean | null;
+  target_url: string;
+  country_code: string | null;
+  created_at: string;
+}
+
+export interface AssetInsert {
+  id: string;
+  request_id: string;
+  organization_id: string;
+  created_at: string;
+}
+
 export type BatchPayload = {
-  responses: Database["public"]["Tables"]["response"]["Insert"][];
-  requests: Database["public"]["Tables"]["request"]["Insert"][];
+  responses: ResponseInsert[];
+  requests: RequestInsert[];
   prompts: PromptRecord[];
-  assets: Database["public"]["Tables"]["asset"]["Insert"][];
-  s3Records: S3Record[];
+  assets: AssetInsert[];
+  s3Records: RequestRecord[];
   requestResponseVersionedCH: RequestResponseRMT[];
   cacheMetricCH: CacheMetricSMT[];
   promptInputs: Prompt2025Input[];
@@ -61,6 +114,16 @@ const maxContentLength = 2_000_000;
 const maxResponseLength = 100_000;
 const MAX_CONTENT_LENGTH = maxContentLength * avgTokenLength; // 2 MB
 const MAX_RESPONSE_LENGTH = maxResponseLength * avgTokenLength; // 100k
+
+const S3_MIN_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB in bytes
+
+function cleanAndTruncateString(text: string, maxLength: number): string {
+  return text
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/[\uD800-\uDFFF]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
 
 export class LoggingHandler extends AbstractLogHandler {
   private batchPayload: BatchPayload;
@@ -94,18 +157,42 @@ export class LoggingHandler extends AbstractLogHandler {
   }
 
   async handle(context: HandlerContext): PromiseGenericResult<string> {
+    const start = performance.now();
+    context.timingMetrics.push({
+      constructor: this.constructor.name,
+      start,
+    });
     // Perform all mappings first and check for failures before updating the batch payload
     try {
+      // rough estimate of size
+      const size = tryToGetSize({
+        b1: context.processedLog.request.body,
+        b2: context.processedLog.response.body,
+      });
+
+      context.sizeBytes = size ?? 0;
+      // Determine storage location:
+      // 1. If free tier limit exceeded AND not PTB, bodies were not stored
+      // 2. If size is small enough, use clickhouse
+      // 3. Otherwise use s3
+      // Note: PTB always stores bodies to S3 for billing purposes
+      const isPTB = context.message.heliconeMeta.isPassthroughBilling;
+      if (context.message.heliconeMeta.freeLimitExceeded && !isPTB) {
+        context.storageLocation = "not_stored_exceeded_free";
+      } else {
+        context.storageLocation =
+          size && size <= S3_MIN_SIZE_THRESHOLD ? "clickhouse" : "s3";
+      }
+
       const requestMapped = this.mapRequest(context);
       const responseMapped = this.mapResponse(context);
-      const assetsMapped = this.mapAssets(context).slice(0, 100);
 
       const s3RecordMapped = this.mapS3Records(context);
 
       // MAP LEGACY PROMPT RECORDS
       const promptMapped =
         context.message.log.request.promptId &&
-        context.processedLog.request.heliconeTemplate
+          context.processedLog.request.heliconeTemplate
           ? this.mapPrompt(context)
           : null;
       const experimentCellValueMapped = this.mapExperimentCellValues(context);
@@ -115,7 +202,8 @@ export class LoggingHandler extends AbstractLogHandler {
       if (
         requestMapped.user_id !== HELICONE_PLAYGROUND_USER_ID &&
         context.orgParams &&
-        !context.orgParams.has_integrated &&
+        (!context.orgParams.has_integrated ||
+          !context.orgParams.has_onboarded) &&
         context.orgParams.id
       ) {
         this.batchPayload.orgsToMarkAsIntegrated.add(context.orgParams.id);
@@ -127,14 +215,14 @@ export class LoggingHandler extends AbstractLogHandler {
         this.sanitizeJsonEscapeSequences(requestResponseVersionedCHMapped);
 
       // Special handling for request_body to ensure it's properly sanitized
+      // Only replace lone surrogates, preserving valid emoji surrogate pairs
       if (
         typeof sanitizedRequestResponseVersionedCHMapped.request_body ===
         "string"
       ) {
         sanitizedRequestResponseVersionedCHMapped.request_body =
-          sanitizedRequestResponseVersionedCHMapped.request_body.replace(
-            /[\uD800-\uDFFF]/g,
-            "\uFFFD"
+          replaceLoneSurrogates(
+            sanitizedRequestResponseVersionedCHMapped.request_body
           );
       }
 
@@ -154,7 +242,6 @@ export class LoggingHandler extends AbstractLogHandler {
 
       this.batchPayload.requests.push(requestMapped);
       this.batchPayload.responses.push(responseMapped);
-      this.batchPayload.assets.push(...assetsMapped);
 
       if (
         context.processedLog.request.scores &&
@@ -168,7 +255,7 @@ export class LoggingHandler extends AbstractLogHandler {
         });
       }
 
-      if (s3RecordMapped) {
+      if (s3RecordMapped && context.storageLocation === "s3") {
         this.batchPayload.s3Records.push(s3RecordMapped);
       }
 
@@ -231,6 +318,11 @@ export class LoggingHandler extends AbstractLogHandler {
 
   async uploadToS3(): PromiseGenericResult<string> {
     const uploadPromises = this.batchPayload.s3Records.map(async (s3Record) => {
+      if (s3Record.location === "clickhouse") {
+        return ok(
+          `Skipping S3 upload for request ID ${s3Record.requestId} as location is clickhouse`
+        );
+      }
       const key = this.s3Client.getRequestResponseKey(
         s3Record.requestId,
         s3Record.organizationId
@@ -251,20 +343,7 @@ export class LoggingHandler extends AbstractLogHandler {
         );
       }
 
-      // Optionally upload assets if they exist
-      if (s3Record.assets && s3Record.assets.size > 0) {
-        const imageUploadRes = await this.storeRequestResponseImage(
-          s3Record.organizationId,
-          s3Record.requestId,
-          s3Record.assets
-        );
-
-        if (imageUploadRes.error) {
-          return err(
-            `Failed to store request response images: ${imageUploadRes.error}`
-          );
-        }
-      }
+      // Note: Assets are no longer uploaded to S3, they remain in request/response bodies as raw data
 
       return ok(`S3 upload successful for request ID ${s3Record.requestId}`);
     });
@@ -276,102 +355,18 @@ export class LoggingHandler extends AbstractLogHandler {
     return ok("All S3 uploads successful");
   }
 
-  private async storeRequestResponseImage(
-    organizationId: string,
-    requestId: string,
-    assets: Map<string, string>
-  ): PromiseGenericResult<string> {
-    const uploadPromises: Promise<void>[] = Array.from(assets.entries()).map(
-      ([assetId, imageUrl]) =>
-        this.handleImageUpload(assetId, imageUrl, requestId, organizationId)
-    );
-
-    await Promise.allSettled(uploadPromises);
-
-    return ok("Images uploaded successfully");
-  }
-
-  private isBase64Image(imageUrl: string): boolean {
-    const MIN_BASE64_LENGTH = 24;
-    const dataUriPattern = /^\s*data:image\/[a-zA-Z]+;base64,/;
-    const base64OnlyPattern = /^[A-Za-z0-9+/=]+\s*$/;
-
-    if (dataUriPattern.test(imageUrl)) {
-      return true;
-    }
-
-    return (
-      base64OnlyPattern.test(imageUrl) && imageUrl.length >= MIN_BASE64_LENGTH
-    );
-  }
-
-  private async handleImageUpload(
-    assetId: string,
-    imageUrl: string,
-    requestId: string,
-    organizationId: string
-  ): Promise<void> {
-    try {
-      if (this.isBase64Image(imageUrl)) {
-        const [assetType, base64Data] = this.extractBase64Data(imageUrl);
-        const buffer = Buffer.from(base64Data, "base64");
-        await this.s3Client.uploadBase64ToS3(
-          buffer,
-          assetType,
-          requestId,
-          organizationId,
-          assetId
-        );
-      } else {
-        const response = await fetch(imageUrl, {
-          headers: {
-            "User-Agent": "Helicone-Worker (https://helicone.ai)",
-          },
-        });
-        if (!response.ok) {
-          throw new Error(`Failed to download image: ${response.statusText}`);
-        }
-        const blob = await response.blob();
-        await this.s3Client.uploadImageToS3(
-          blob,
-          requestId,
-          organizationId,
-          assetId
-        );
-      }
-    } catch (error) {
-      console.error("Error uploading image:", error);
-      // If we fail to upload an image, we don't want to fail logging the request
-    }
-  }
-
-  private extractBase64Data(dataUri: string): [string, string] {
-    const dataUriRegex =
-      /^data:(image\/(?:png|jpeg|jpg|gif|webp|svg\+xml));base64,([A-Za-z0-9+/=]+)$/;
-    const base64Regex = /^([A-Za-z0-9+/=]+)$/;
-
-    let matches = dataUri.match(dataUriRegex);
-    if (matches && matches.length === 3) {
-      return [matches[1], matches[2]];
-    }
-
-    matches = dataUri.match(base64Regex);
-    if (matches && matches.length === 2) {
-      return ["image/jpeg", matches[1]];
-    }
-
-    console.error("Invalid or unsupported base64 image data:", dataUri);
-    return ["", ""];
-  }
-
   async logToClickhouse(): PromiseGenericResult<string> {
     try {
-      const result = await this.requestStore.insertRequestResponseVersioned(
-        this.batchPayload.requestResponseVersionedCH
-      );
-
-      if (result.error) {
-        return err(`Error inserting request response logs: ${result.error}`);
+      if (
+        Array.isArray(this.batchPayload.requestResponseVersionedCH) &&
+        this.batchPayload.requestResponseVersionedCH.length > 0
+      ) {
+        const result = await this.requestStore.insertRequestResponseVersioned(
+          this.batchPayload.requestResponseVersionedCH
+        );
+        if (result.error) {
+          return err(`Error inserting request response logs: ${result.error}`);
+        }
       }
 
       if (this.batchPayload.cacheMetricCH.length > 0) {
@@ -387,53 +382,29 @@ export class LoggingHandler extends AbstractLogHandler {
       return ok("All logs inserted successfully.");
     } catch (error: any) {
       return err(
-        `Unexpected error during logging to Clickhouse: ${
-          error.message ?? "No error message provided"
+        `Unexpected error during logging to Clickhouse: ${error.message ?? "No error message provided"
         }`
       );
     }
   }
 
-  mapS3Records(context: HandlerContext): S3Record | null {
+  mapS3Records(context: HandlerContext): RequestRecord | null {
     const request = context.message.log.request;
     const orgParams = context.orgParams;
-    const assets = context.processedLog.assets;
 
     if (!orgParams?.id) {
       return null;
     }
 
-    const s3Record: S3Record = {
+    const s3Record: RequestRecord = {
       requestId: request.id,
       organizationId: orgParams.id,
       requestBody: context.processedLog.request.body,
       responseBody: context.processedLog.response.body,
-      assets: assets ?? new Map(),
+      location: context.storageLocation ?? "s3",
     };
 
     return s3Record;
-  }
-
-  mapAssets(
-    context: HandlerContext
-  ): Database["public"]["Tables"]["asset"]["Insert"][] {
-    const request = context.message.log.request;
-    const orgParams = context.orgParams;
-    const assets = context.processedLog.assets;
-
-    if (!orgParams?.id || !assets || assets.size === 0) {
-      return [];
-    }
-
-    const assetInserts: Database["public"]["Tables"]["asset"]["Insert"][] =
-      Array.from(assets.entries()).map(([assetId]) => ({
-        id: assetId,
-        request_id: request.id,
-        organization_id: orgParams.id,
-        created_at: request.requestCreatedAt.toISOString(),
-      }));
-
-    return assetInserts;
   }
 
   mapExperimentCellValues(context: HandlerContext): ExperimentCellValue | null {
@@ -505,7 +476,27 @@ export class LoggingHandler extends AbstractLogHandler {
   mapRequestResponseVersionedCH(context: HandlerContext): RequestResponseRMT {
     const request = context.message.log.request;
     const response = context.message.log.response;
-    const usage = context.usage;
+    const legacyUsage = context.legacyUsage;
+    const modelUsage = context.usage;
+    const promptTokens = atLeastZero(
+      getPromptTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const completionTokens = atLeastZero(
+      getCompletionTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const promptCacheWriteTokens = atLeastZero(
+      getPromptCacheWriteTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const promptCacheReadTokens = atLeastZero(
+      getPromptCacheReadTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const promptAudioTokens = atLeastZero(
+      getPromptAudioTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const completionAudioTokens = atLeastZero(
+      getCompletionAudioTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const reasoningTokens = atLeastZero(getReasoningTokens(modelUsage) ?? 0);
     const orgParams = context.orgParams;
     const { requestText, responseText } =
       this.requestResponseTextFromContext(context);
@@ -514,43 +505,44 @@ export class LoggingHandler extends AbstractLogHandler {
       context.message.log.request.cacheReferenceId &&
       context.message.log.request.cacheReferenceId != DEFAULT_UUID;
 
+    let rawCost;
+    // For requests on the new AI Gateway, both PTB and BYOK, we want to
+    // set cost to zero if we cannot calculate it from the new usage processor+registry
+    // rather than falling back to legacy usage cost
+    if (context.message.heliconeMeta.providerModelId) {
+      rawCost = atLeastZero(context.costBreakdown?.totalCost ?? 0);
+    } else {
+      rawCost = atLeastZero(
+        context.costBreakdown?.totalCost ?? context.legacyUsage.cost ?? 0
+      );
+    }
+    const cost = Math.round(rawCost * COST_PRECISION_MULTIPLIER);
+
     const requestResponseLog: RequestResponseRMT = {
       user_id:
         typeof request.userId === "string"
           ? request.userId
           : String(request.userId),
       request_id: request.id,
-      completion_tokens: isCacheHit ? 0 : (usage.completionTokens ?? 0),
       latency: response.delayMs ?? 0,
-      model: context.processedLog.model ?? "",
-      prompt_tokens: isCacheHit ? 0 : (usage.promptTokens ?? 0),
-      prompt_cache_write_tokens: isCacheHit
-        ? 0
-        : (usage.promptCacheWriteTokens ?? 0),
-      prompt_cache_read_tokens: isCacheHit
-        ? 0
-        : (usage.promptCacheReadTokens ?? 0),
-      prompt_audio_tokens: isCacheHit ? 0 : (usage.promptAudioTokens ?? 0),
-      completion_audio_tokens: isCacheHit
-        ? 0
-        : (usage.completionAudioTokens ?? 0),
-      cost: response.cost
-        ? (response.cost * COST_PRECISION_MULTIPLIER)
-        : isCacheHit
-        ? 0
-        : modelCost({
-            provider: request.provider ?? "",
-            model: context.processedLog.model ?? "",
-            sum_prompt_tokens: usage.promptTokens ?? 0,
-            sum_completion_tokens: usage.completionTokens ?? 0,
-            prompt_cache_write_tokens: usage.promptCacheWriteTokens ?? 0,
-            prompt_cache_read_tokens: usage.promptCacheReadTokens ?? 0,
-            prompt_audio_tokens: usage.promptAudioTokens ?? 0,
-            completion_audio_tokens: usage.completionAudioTokens ?? 0,
-            sum_tokens:
-              (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0),
-            multiple: COST_PRECISION_MULTIPLIER,
-          }),
+      model:
+        context.message.heliconeMeta.gatewayModel ??
+        context.processedLog.model ??
+        "",
+      completion_tokens: atLeastZero(isCacheHit ? 0 : completionTokens),
+      prompt_tokens: atLeastZero(isCacheHit ? 0 : promptTokens),
+      prompt_cache_write_tokens: atLeastZero(
+        isCacheHit ? 0 : promptCacheWriteTokens
+      ),
+      prompt_cache_read_tokens: atLeastZero(
+        isCacheHit ? 0 : promptCacheReadTokens
+      ),
+      prompt_audio_tokens: atLeastZero(isCacheHit ? 0 : promptAudioTokens),
+      completion_audio_tokens: atLeastZero(
+        isCacheHit ? 0 : completionAudioTokens
+      ),
+      reasoning_tokens: atLeastZero(isCacheHit ? 0 : reasoningTokens),
+      cost: cost,
       request_created_at: formatTimeString(
         request.requestCreatedAt.toISOString()
       ),
@@ -565,12 +557,11 @@ export class LoggingHandler extends AbstractLogHandler {
       threat: request.threat ?? false,
       time_to_first_token: Math.round(response.timeToFirstToken ?? 0),
       target_url: request.targetUrl ?? "",
-      provider: request.provider ?? "",
+      provider:
+        context.message.heliconeMeta.gatewayProvider ?? request.provider ?? "",
       country_code: request.countryCode ?? "",
       properties: context.processedLog.request.properties ?? {},
-      assets: context.processedLog.assets
-        ? Array.from(context.processedLog.assets.keys())
-        : [],
+      assets: [],
       scores: Object.fromEntries(
         Object.entries(context.processedLog.request.scores ?? {}).map(
           ([key, value]) => [key, +(value ?? 0)]
@@ -581,13 +572,15 @@ export class LoggingHandler extends AbstractLogHandler {
       cache_reference_id:
         context.message.log.request.cacheReferenceId ?? undefined,
       cache_enabled: context.message.log.request.cacheEnabled ?? false,
-      gateway_router_id:
-        context.message.heliconeMeta.gatewayRouterId ?? undefined,
-      gateway_deployment_target:
-        context.message.heliconeMeta.gatewayDeploymentTarget ?? undefined,
       prompt_id: context.message.heliconeMeta.promptId ?? "",
       prompt_version: context.message.heliconeMeta.promptVersionId ?? "",
       request_referrer: context.message.log.request.requestReferrer ?? "",
+      is_passthrough_billing:
+        context.message.heliconeMeta.isPassthroughBilling ?? false,
+      ai_gateway_body_mapping:
+        context.message.heliconeMeta.aiGatewayBodyMapping ?? "",
+      storage_location: context.storageLocation ?? "s3",
+      size_bytes: context.sizeBytes ?? 0,
     };
 
     return requestResponseLog;
@@ -599,7 +592,26 @@ export class LoggingHandler extends AbstractLogHandler {
 
     const request = context.message.log.request;
     const response = context.message.log.response;
-    const usage = context.usage;
+    const legacyUsage = context.legacyUsage;
+    const modelUsage = context.usage;
+    const promptTokens = atLeastZero(
+      getPromptTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const completionTokens = atLeastZero(
+      getCompletionTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const promptCacheWriteTokens = atLeastZero(
+      getPromptCacheWriteTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const promptCacheReadTokens = atLeastZero(
+      getPromptCacheReadTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const promptAudioTokens = atLeastZero(
+      getPromptAudioTokens(modelUsage, legacyUsage) ?? 0
+    );
+    const completionAudioTokens = atLeastZero(
+      legacyUsage.completionAudioTokens ?? 0
+    );
     const orgParams = context.orgParams;
 
     const cacheMetricLog: CacheMetricSMT = {
@@ -611,12 +623,12 @@ export class LoggingHandler extends AbstractLogHandler {
       provider: request.provider ?? "",
       cache_hit_count: 1,
       saved_latency_ms: context.message.log.response.cachedLatency ?? 0,
-      saved_completion_tokens: usage.completionTokens ?? 0,
-      saved_prompt_tokens: usage.promptTokens ?? 0,
-      saved_prompt_cache_write_tokens: usage.promptCacheWriteTokens ?? 0,
-      saved_prompt_cache_read_tokens: usage.promptCacheReadTokens ?? 0,
-      saved_prompt_audio_tokens: usage.promptAudioTokens ?? 0,
-      saved_completion_audio_tokens: usage.completionAudioTokens ?? 0,
+      saved_completion_tokens: atLeastZero(completionTokens),
+      saved_prompt_tokens: atLeastZero(promptTokens),
+      saved_prompt_cache_write_tokens: atLeastZero(promptCacheWriteTokens),
+      saved_prompt_cache_read_tokens: atLeastZero(promptCacheReadTokens),
+      saved_prompt_audio_tokens: atLeastZero(promptAudioTokens),
+      saved_completion_audio_tokens: atLeastZero(completionAudioTokens),
       last_hit: formatTimeString(response.responseCreatedAt.toISOString()),
       first_hit: formatTimeString(response.responseCreatedAt.toISOString()),
       request_body: requestText,
@@ -631,16 +643,33 @@ export class LoggingHandler extends AbstractLogHandler {
     responseText: string;
   } {
     try {
+      // If free tier limit exceeded, bodies were not stored
+      if (context.storageLocation === "not_stored_exceeded_free") {
+        return {
+          requestText: "",
+          responseText: "",
+        };
+      }
+      if (context.storageLocation === "clickhouse") {
+        return {
+          requestText: JSON.stringify(context.processedLog.request.body),
+          responseText: JSON.stringify(context.processedLog.response.body),
+        };
+      }
       const mappedContent = heliconeRequestToMappedContent(
         toHeliconeRequest(context)
       );
+      const requestText =
+        mappedContent.preview?.fullRequestText?.() ??
+        JSON.stringify(mappedContent.raw.request);
+
+      const responseText =
+        mappedContent.preview?.fullResponseText?.() ??
+        JSON.stringify(mappedContent.raw.response);
+
       return {
-        requestText:
-          mappedContent.preview?.fullRequestText?.() ??
-          JSON.stringify(mappedContent.raw.request),
-        responseText:
-          mappedContent.preview?.fullResponseText?.() ??
-          JSON.stringify(mappedContent.raw.request),
+        requestText: cleanAndTruncateString(requestText, MAX_CONTENT_LENGTH),
+        responseText: cleanAndTruncateString(responseText, MAX_RESPONSE_LENGTH),
       };
     } catch (error) {
       console.error("Error mapping request/response for preview:", error);
@@ -688,17 +717,19 @@ export class LoggingHandler extends AbstractLogHandler {
   /**
    * Sanitizes JSON data by removing invalid escape sequences
    * This is needed to fix the "missing second part of surrogate pair" error
+   * Only replaces lone surrogates, preserving valid emoji surrogate pairs
    * @param obj - The object to sanitize
    * @returns A sanitized copy of the object
    */
   private sanitizeJsonEscapeSequences<T>(obj: T): T {
     // Create a deep copy of the object through serialization
-    // and replace any invalid surrogate pairs
+    // and replace only lone (unpaired) surrogates, preserving valid emoji pairs
     try {
       const sanitizedJson = JSON.stringify(obj, (_, value) => {
         if (typeof value === "string") {
-          // Replace any lone surrogate halves with the Unicode replacement character (U+FFFD)
-          return value.replace(/[\uD800-\uDFFF]/g, "\uFFFD");
+          // Replace only lone surrogate halves with the Unicode replacement character (U+FFFD)
+          // Valid surrogate pairs (emojis) are preserved
+          return replaceLoneSurrogates(value);
         }
         return value;
       });
@@ -710,9 +741,7 @@ export class LoggingHandler extends AbstractLogHandler {
     }
   }
 
-  mapResponse(
-    context: HandlerContext
-  ): Database["public"]["Tables"]["response"]["Insert"] {
+  mapResponse(context: HandlerContext): ResponseInsert {
     const response = context.message.log.response;
     const processedResponse = context.processedLog.response;
     const orgParams = context.orgParams;
@@ -720,16 +749,25 @@ export class LoggingHandler extends AbstractLogHandler {
     // Sanitize delay_ms to prevent PostgreSQL integer overflow
     const sanitizedDelayMs = this.sanitizeDelayMs(response.delayMs);
 
-    const responseInsert: Database["public"]["Tables"]["response"]["Insert"] = {
+    const promptCacheWriteTokens = getPromptCacheWriteTokens(
+      context.usage,
+      context.legacyUsage
+    );
+    const promptCacheReadTokens = getPromptCacheReadTokens(
+      context.usage,
+      context.legacyUsage
+    );
+    const responseInsert: ResponseInsert = {
       id: response.id,
       request: context.message.log.request.id,
       helicone_org_id: orgParams?.id ?? null,
       status: response.status,
       model: processedResponse.model,
-      completion_tokens: context.usage.completionTokens,
-      prompt_tokens: context.usage.promptTokens,
-      prompt_cache_write_tokens: context.usage.promptCacheWriteTokens,
-      prompt_cache_read_tokens: context.usage.promptCacheReadTokens,
+      completion_tokens:
+        context.usage?.output ?? context.legacyUsage.completionTokens,
+      prompt_tokens: context.usage?.input ?? context.legacyUsage.promptTokens,
+      prompt_cache_write_tokens: promptCacheWriteTokens,
+      prompt_cache_read_tokens: promptCacheReadTokens,
       time_to_first_token: response.timeToFirstToken,
       delay_ms: sanitizedDelayMs,
       created_at: response.responseCreatedAt.toISOString(),
@@ -738,16 +776,14 @@ export class LoggingHandler extends AbstractLogHandler {
     return responseInsert;
   }
 
-  mapRequest(
-    context: HandlerContext
-  ): Database["public"]["Tables"]["request"]["Insert"] {
+  mapRequest(context: HandlerContext): RequestInsert {
     const request = context.message.log.request;
     const orgParams = context.orgParams;
     const authParams = context.authParams;
     const heliconeMeta = context.message.heliconeMeta;
     const processedRequest = context.processedLog.request;
 
-    const requestInsert: Database["public"]["Tables"]["request"]["Insert"] = {
+    const requestInsert: RequestInsert = {
       id: request.id,
       path: request.path,
       auth_hash: "",
@@ -769,40 +805,7 @@ export class LoggingHandler extends AbstractLogHandler {
 
     return requestInsert;
   }
-
-  private ensureMaxVectorLength = (text: string): string => {
-    const maxBytes = 512000; // ~500k less than 1MB for buffer
-    text = text.replace(/[^\x00-\x7F]/g, "");
-    text = text.trim();
-
-    let buffer = Buffer.from(text, "utf-8");
-
-    if (buffer.length <= maxBytes) {
-      return text;
-    }
-
-    let truncatedBuffer = Buffer.alloc(maxBytes);
-    buffer.copy(truncatedBuffer, 0, 0, maxBytes);
-
-    let endIndex = maxBytes;
-    while (endIndex > 0 && truncatedBuffer[endIndex - 1] >> 6 === 2) {
-      endIndex--;
-    }
-
-    const truncatedText = truncatedBuffer.toString("utf-8", 0, endIndex);
-
-    return truncatedText;
-  };
-
   cleanBody(body: string): string {
     return body.replace(/\u0000/g, "");
   }
-
-  private vectorizeModel = (model: string): boolean => {
-    if (!model) {
-      return false;
-    }
-    const nonVectorizedModels: Set<string> = new Set(["dall-e-2", "dall-e-3"]);
-    return !nonVectorizedModels.has(model);
-  };
 }

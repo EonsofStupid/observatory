@@ -1,6 +1,7 @@
 import FoldedHeader from "@/components/shared/FoldedHeader";
 import { FreeTierLimitBanner } from "@/components/shared/FreeTierLimitBanner";
 import { EmptyStateCard } from "@/components/shared/helicone/EmptyStateCard";
+import LivePill from "@/components/shared/LivePill";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -30,7 +31,7 @@ import { SortDirection } from "@/services/lib/sorts/requests/sorts";
 import { TimeFilter } from "@/types/timeFilter";
 import { Check, ChevronDown, PieChart, Table } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getTimeIntervalAgo,
   TimeInterval,
@@ -38,7 +39,11 @@ import {
 import { useSelectMode } from "../../../services/hooks/dataset/selectMode";
 import { useDebounce } from "../../../services/hooks/debounce";
 import { getRequestsByIdsWithBodies } from "../../../services/hooks/requests";
-import { useSessionNames, useSessions } from "../../../services/hooks/sessions";
+import {
+  useSessionNames,
+  useSessions,
+  useSessionsAggregateMetrics,
+} from "../../../services/hooks/sessions";
 import {
   columnDefsToDragColumnItems,
   DragColumnItem,
@@ -50,6 +55,8 @@ import ThemedTimeFilter from "../../shared/themed/themedTimeFilter";
 import { getColumns } from "./initialColumns";
 import { EMPTY_SESSION_NAME } from "./sessionId/SessionContent";
 import SessionMetrics from "./SessionMetrics";
+import TableFooter from "../requests/tableFooter";
+import { useRouter } from "next/router";
 
 interface SessionsPageProps {
   currentPage: number;
@@ -77,6 +84,7 @@ export type TSessions = {
     completion_tokens: number;
     total_tokens: number;
     avg_latency: number;
+    user_ids: string[];
   };
 };
 
@@ -101,9 +109,18 @@ const SessionsPage = (props: SessionsPageProps) => {
     columnDefsToDragColumnItems(getColumns()),
   );
 
-  const [timeFilter, setTimeFilter] = useState<TimeFilter>({
-    start: getTimeIntervalAgo("1m"),
-    end: new Date(),
+  const [currentPageSize, setCurrentPageSize] = useState<number>(
+    props.pageSize,
+  );
+  const [page, setPage] = useState<number>(props.currentPage);
+
+  const [timeFilter, setTimeFilter] = useState<TimeFilter>(() => {
+    const now = new Date();
+    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+    return {
+      start: threeDaysAgo,
+      end: now,
+    };
   });
 
   const [sessionIdSearch] = useURLParams<string | undefined>(
@@ -115,6 +132,7 @@ const SessionsPage = (props: SessionsPageProps) => {
   const [sessionNameSearch, setSessionNameSearch] = useState<
     string | undefined
   >(undefined);
+  const [isLive, setIsLive] = useLocalStorage("isLive-SessionsPage", false);
 
   const debouncedSessionNameSearch = useDebounce(sessionNameSearch, 500);
 
@@ -130,20 +148,34 @@ const SessionsPage = (props: SessionsPageProps) => {
   ];
   const allNames = useSessionNames("", timeFilter);
 
+  const router = useRouter();
   const debouncedSessionIdSearch = useDebounce(sessionIdSearch, 500); // 0.5 seconds
   const [selectedName, setSelectedName] = useState<string | undefined>(
     props.selectedName,
   );
 
-  const { sessions, isLoading, hasSessions } = useSessions({
+  const { sessions, isLoading, hasSessions, refetch, isRefetching } = useSessions({
     timeFilter,
     sessionIdSearch: debouncedSessionIdSearch ?? "",
     selectedName,
+    page: page,
+    pageSize: currentPageSize,
+    isLive,
   });
+
+  const { aggregateMetrics, isLoading: isCountLoading } =
+    useSessionsAggregateMetrics({
+      timeFilter,
+      sessionIdSearch: debouncedSessionIdSearch ?? "",
+      selectedName,
+    });
 
   const sessionsWithId = useMemo(() => {
     return sessions.map((session, index) => ({
-      metadata: session,
+      metadata: {
+        ...session,
+        user_ids: session.user_ids ?? [],
+      },
       id: index.toString(),
     }));
   }, [sessions]);
@@ -170,6 +202,20 @@ const SessionsPage = (props: SessionsPageProps) => {
       setSelectedName(value);
     }
   };
+
+  const handlePageChange = useCallback(
+    (newPage: number) => {
+      router.push(
+        {
+          pathname: router.pathname,
+          query: { ...router.query, page: newPage.toString() },
+        },
+        undefined,
+        { shallow: true },
+      );
+    },
+    [router],
+  );
 
   const isSessionsLoading = isLoading || allNames.isLoading || names.isLoading;
 
@@ -224,46 +270,24 @@ const SessionsPage = (props: SessionsPageProps) => {
     [isShiftPressed, toggleSelection],
   );
 
-  // Calculate aggregated stats
   const aggregatedStats = useMemo(() => {
-    if (!sessions || sessions.length === 0) {
+    if (!aggregateMetrics) {
       return {
-        lastUsed: "-",
         avgCost: "-",
         avgLatency: "-",
         totalCost: "-",
         totalSessions: 0,
-        createdOn: "-",
       };
     }
 
-    const totalCost = sessions.reduce((sum, s) => sum + s.total_cost, 0);
-    const avgCost = totalCost / sessions.length;
-    const lastUsed = new Date(
-      Math.max(
-        ...sessions.map((s) => new Date(s.latest_request_created_at).getTime()),
-      ),
-    ).toLocaleString();
-    const createdOn = new Date(
-      Math.min(...sessions.map((s) => new Date(s.created_at).getTime())),
-    ).toLocaleDateString();
-
-    // Calculate simple average of session average latencies
-    const totalAvgLatency = sessions.reduce((sum, s) => sum + s.avg_latency, 0);
-    const avgLatency =
-      sessions.length > 0 ? totalAvgLatency / sessions.length : 0;
-
     return {
-      lastUsed,
-      avgCost: `$${avgCost.toFixed(4)}`,
-      avgLatency: `${(avgLatency * 1000).toFixed(0)}ms`,
-      totalCost: `$${totalCost.toFixed(4)}`,
-      totalSessions: sessions.length,
-      createdOn,
+      avgCost: `$${aggregateMetrics.avg_cost.toFixed(4)}`,
+      avgLatency: `${(aggregateMetrics.avg_latency * 1000).toFixed(0)}ms`,
+      totalCost: `$${aggregateMetrics.total_cost.toFixed(4)}`,
+      totalSessions: aggregateMetrics.count,
     };
-  }, [sessions]);
+  }, [aggregateMetrics]);
   const statsToDisplay = [
-    { label: "Last Used", value: aggregatedStats.lastUsed },
     { label: "Avg Cost", value: aggregatedStats.avgCost },
     { label: "Avg Latency", value: aggregatedStats.avgLatency },
     { label: "Total Cost", value: aggregatedStats.totalCost },
@@ -271,8 +295,17 @@ const SessionsPage = (props: SessionsPageProps) => {
       label: "Total Sessions",
       value: aggregatedStats.totalSessions.toString(),
     },
-    { label: "Created On", value: aggregatedStats.createdOn },
   ];
+
+  useEffect(() => {
+    const pageFromQuery = router.query.page;
+    if (pageFromQuery && !Array.isArray(pageFromQuery)) {
+      const parsedPage = parseInt(pageFromQuery, 10);
+      if (!isNaN(parsedPage) && parsedPage !== page) {
+        setPage(parsedPage);
+      }
+    }
+  }, [router.query.page]);
 
   return hasSessions || isSessionsLoading ? (
     <main className="flex h-screen w-full animate-fade-in flex-col">
@@ -293,7 +326,7 @@ const SessionsPage = (props: SessionsPageProps) => {
                 <PopoverTrigger
                   asChild
                   className={cn(
-                    "flex h-8 w-[280px] items-center justify-between rounded-md border border-sky-200 bg-white px-3 py-2 text-xs ring-offset-white placeholder:text-slate-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 dark:bg-sidebar-background",
+                    "flex h-8 w-[180px] items-center justify-between rounded-md border border-sky-200 bg-white px-3 py-2 text-xs ring-offset-white placeholder:text-slate-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 dark:bg-sidebar-background",
                     "focus:ring-2 focus:ring-slate-950 focus:ring-offset-2 dark:focus:ring-slate-300",
                   )}
                 >
@@ -308,7 +341,7 @@ const SessionsPage = (props: SessionsPageProps) => {
                     <ChevronDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-[280px] p-0">
+                <PopoverContent className="w-[180px] p-0">
                   <Command>
                     <CommandInput
                       placeholder="Search sessions..."
@@ -354,8 +387,9 @@ const SessionsPage = (props: SessionsPageProps) => {
                 timeFilterOptions={[]}
                 onSelect={onTimeSelectHandler}
                 isFetching={isSessionsLoading}
-                defaultValue={"1m"}
+                defaultValue={"7d"}
                 custom={true}
+                isLive={isLive}
               />
 
               <FilterASTButton />
@@ -363,6 +397,14 @@ const SessionsPage = (props: SessionsPageProps) => {
           }
           rightSection={
             <section className="flex flex-row items-center gap-2">
+              <LivePill
+                isLive={isLive}
+                setIsLive={setIsLive}
+                isDataLoading={isLoading}
+                isRefetching={isRefetching}
+                refetch={refetch}
+              />
+
               <div className="flex flex-row items-center gap-2 rounded-lg bg-sky-200">
                 {selectedIds.length > 0 && (
                   <Tooltip>
@@ -428,27 +470,43 @@ const SessionsPage = (props: SessionsPageProps) => {
           />
         )}
 
-        <TabsContent value="sessions" className="h-full w-full">
-          <ThemedTable
-            id="sessions-table"
-            tableRef={tableRef}
-            defaultData={sessionsWithId}
-            defaultColumns={getColumns()}
-            skeletonLoading={isLoading}
-            dataLoading={isLoading}
-            activeColumns={activeColumns}
-            setActiveColumns={setActiveColumns}
-            rowLink={(row: TSessions) =>
-              `/sessions/${
-                row.metadata.session_name
-                  ? encodeURIComponent(row.metadata.session_name)
-                  : EMPTY_SESSION_NAME
-              }/${encodeURIComponent(row.metadata.session_id)}`
-            }
-            checkboxMode={"on_hover"}
-            onRowSelect={onRowSelectHandler}
-            onSelectAll={selectAll}
-            selectedIds={selectedIds}
+        <TabsContent
+          value="sessions"
+          className="flex min-h-0 w-full flex-1 flex-col"
+        >
+          <div className="min-h-0 flex-1">
+            <ThemedTable
+              id="sessions-table"
+              tableRef={tableRef}
+              defaultData={sessionsWithId}
+              defaultColumns={getColumns()}
+              skeletonLoading={isSessionsLoading}
+              dataLoading={isSessionsLoading}
+              activeColumns={activeColumns}
+              setActiveColumns={setActiveColumns}
+              rowLink={(row: TSessions) =>
+                `/sessions/${
+                  row.metadata.session_name
+                    ? encodeURIComponent(row.metadata.session_name)
+                    : EMPTY_SESSION_NAME
+                }/${encodeURIComponent(row.metadata.session_id)}`
+              }
+              checkboxMode={"on_hover"}
+              onRowSelect={onRowSelectHandler}
+              onSelectAll={selectAll}
+              selectedIds={selectedIds}
+              loadingText="Loading sessions..."
+            />
+          </div>
+
+          <TableFooter
+            currentPage={page}
+            pageSize={currentPageSize}
+            isCountLoading={isCountLoading}
+            count={aggregateMetrics?.count || 0}
+            onPageChange={(n) => handlePageChange(n)}
+            onPageSizeChange={(n) => setCurrentPageSize(n)}
+            pageSizeOptions={[25, 50, 100, 250, 500]}
           />
         </TabsContent>
         <TabsContent value="metrics">

@@ -22,12 +22,13 @@ import TeamCard from "../components/templates/pricing/TeamCard";
 import CustomerHighlights from "../components/templates/pricing/CustomerHighlights";
 import AvailableDiscounts from "../components/templates/pricing/AvailableDiscounts";
 import Companies from "@/components/home/Companies";
+import UsageEstimator from "../components/templates/pricing/UsageEstimator";
 
 export default function PricingPage() {
   return (
     <div className="bg-background text-slate-700">
       <div className=" mx-auto antialiased">
-        <div className="flex flex-col max-w-6xl mx-auto p-4 pb-24 pt-8 sm:pb-32 lg:flex gap-8 md:gap-16">
+        <div className="flex flex-col max-w-6xl mx-auto p-8 lg:flex gap-8 md:gap-16">
           <Col className="items-center gap-4">
             <span className="block sm:hidden">
               <Image
@@ -62,18 +63,16 @@ export default function PricingPage() {
             <TeamCard />
             <EnterpriseCard />
           </div>
+        </div>
 
-          <div className="flex mt-4 justify-center flex-col items-center gap-4">
-            <h2 className="text-xl font-semibold text-sidebar-foreground text-center leading-8">
-              Powering leading companies
-              <br />
-              <span className="text-muted-foreground">
-                from next-gen startups to enterprise
-              </span>
-            </h2>
-            <Companies className="w-full" />
+        {/* Full-width gray section for calculator */}
+        <div id="calculator" className="bg-slate-50 py-12">
+          <div className="max-w-6xl mx-auto px-4">
+            <UsageEstimator />
           </div>
+        </div>
 
+        <div className="flex flex-col max-w-6xl mx-auto p-4 pt-8 gap-8 md:gap-16">
           <CustomerHighlights />
 
           <PricingComparisonTable />
@@ -108,13 +107,21 @@ export default function PricingPage() {
                     How is Helicone&apos;s usage-based pricing calculated?
                   </AccordionTrigger>
                   <AccordionContent className="accordion-content-style">
-                    Helicone&apos;s usage-based pricing is calculated based on
-                    the number of requests you make to our API. You can find the
-                    rate per log under &quot;Additional logs&quot; in the table
-                    above.
+                    Helicone&apos;s usage-based pricing has two components:
                     <br />
                     <br />
-                    You can also find your monthly usage in the{" "}
+                    <strong>Request-based pricing:</strong> The first 10,000
+                    requests are free. After that, rates decrease as your usage
+                    grows, starting at $0.0007/request and going as low as
+                    $0.00002/request for high volumes.
+                    <br />
+                    <br />
+                    <strong>Storage-based pricing:</strong> Storage is billed in
+                    tiers starting at $3.25/GB for the first 30 GB, decreasing
+                    to $0.50/GB for volumes over 450 GB.
+                    <br />
+                    <br />
+                    You can find your monthly usage in the{" "}
                     <Link
                       href="https://us.helicone.ai/settings/billing"
                       className="underline hover:text-brand"
@@ -127,17 +134,18 @@ export default function PricingPage() {
 
                 <AccordionItem value="item-3">
                   <AccordionTrigger className="font-medium text-left">
-                    What happens if I exceed my request limit?
+                    What happens if I exceed my limits?
                   </AccordionTrigger>
                   <AccordionContent className="accordion-content-style">
-                    On the Free plan, you can view up to 10,000 requests per
-                    month in Helicone. Don&apos;t worry, we are still logging
-                    all your incoming requests in the background. To access
-                    them, you can upgrade to the Pro plan at any time.
+                    On the Free plan, you get 10,000 free requests and 1 GB of
+                    storage. We continue logging all your requests in the
+                    background. To access them, you can upgrade to the Pro plan
+                    at any time.
                     <br />
                     <br />
-                    If you are on the Pro or Team plan, any usage beyond 10,000
-                    requests per month will be automatically billed.
+                    If you are on the Pro or Team plan, additional usage is
+                    automatically billed at tiered rates that decrease as you
+                    scale - the more you use, the less you pay per unit.
                   </AccordionContent>
                 </AccordionItem>
 

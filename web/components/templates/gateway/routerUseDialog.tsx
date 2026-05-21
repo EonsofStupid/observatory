@@ -12,16 +12,19 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { DiffHighlight } from "@/components/templates/welcome/diffHighlight";
 
 export const getRouterCode = (language: string, apiKey?: string) => {
-  const baseUrl = process.env.NEXT_PUBLIC_CLOUD_GATEWAY_BASE_URL
-    ? `${process.env.NEXT_PUBLIC_CLOUD_GATEWAY_BASE_URL}/v1`
-    : "https://ai-gateway.helicone.ai";
+  const baseUrl =
+    process.env.NODE_ENV === "development"
+      ? "http://localhost:8793"
+      : process.env.NEXT_PUBLIC_CLOUD_GATEWAY_BASE_URL
+        ? `${process.env.NEXT_PUBLIC_CLOUD_GATEWAY_BASE_URL}/v1`
+        : "https://ai-gateway.helicone.ai";
 
   if (language === "curl") {
     return `curl ${baseUrl}/chat/completions \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${apiKey ?? "YOUR_HELICONE_API_KEY"}" \\
   -d '{
-    "model": "gpt-4o-mini/openai",
+    "model": "gpt-4o-mini",
     "messages": [
       {
         "role": "user",
@@ -38,7 +41,7 @@ const openai = new OpenAI({
 });
 
 const completion = await openai.chat.completions.create({
-  model: 'gpt-4o-mini/openai',
+  model: 'gpt-4o-mini',
   messages: [
     {
       role: 'user',
@@ -55,7 +58,7 @@ client = OpenAI(
 )
 
 completion = client.chat.completions.create(
-  model="gpt-4o-mini/openai",
+  model="gpt-4o-mini",
   messages=[
     {
       "role": "user",
@@ -79,7 +82,12 @@ const RouterUseDialog = ({
   open: boolean;
   setOpen: (open: boolean) => void;
 }) => {
-  const baseUrl = `${process.env.NEXT_PUBLIC_CLOUD_GATEWAY_BASE_URL}/router/${routerHash}`;
+  const gatewayBaseUrl =
+    process.env.NODE_ENV === "development"
+      ? "http://localhost:8793"
+      : process.env.NEXT_PUBLIC_CLOUD_GATEWAY_BASE_URL ||
+        "https://ai-gateway.helicone.ai";
+  const baseUrl = `${gatewayBaseUrl}/router/${routerHash}`;
 
   if (!routerHash) {
     return null;
@@ -118,7 +126,7 @@ const RouterUseDialog = ({
 
             <TabsContent value="curl" className="mt-4">
               <DiffHighlight
-                code={getRouterCode(baseUrl, "curl")}
+                code={getRouterCode("curl")}
                 language="bash"
                 newLines={[]}
                 oldLines={[]}
@@ -129,7 +137,7 @@ const RouterUseDialog = ({
 
             <TabsContent value="javascript" className="mt-4">
               <DiffHighlight
-                code={getRouterCode(baseUrl, "javascript")}
+                code={getRouterCode("javascript")}
                 language="typescript"
                 newLines={[]}
                 oldLines={[]}
@@ -140,7 +148,7 @@ const RouterUseDialog = ({
 
             <TabsContent value="python" className="mt-4">
               <DiffHighlight
-                code={getRouterCode(baseUrl, "python")}
+                code={getRouterCode("python")}
                 language="python"
                 newLines={[]}
                 oldLines={[]}

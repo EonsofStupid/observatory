@@ -1,5 +1,21 @@
+import crypto from "crypto";
 import { NextApiRequest, NextApiResponse } from "next";
 import { IntercomSlackService } from "../../lib/intercom-slack-service";
+
+function verifyIntercomWebhook(
+  payload: string,
+  signatureHash: string,
+  secret: string,
+): boolean {
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(payload)
+    .digest("hex");
+  return crypto.timingSafeEqual(
+    Buffer.from(digest),
+    Buffer.from(signatureHash),
+  );
+}
 
 interface IntercomMessage {
   type: string;
@@ -84,13 +100,21 @@ export default async function handler(
     }
 
     const payload = JSON.stringify(req.body);
+    const signature = req.headers["x-hub-signature"] as string | undefined;
+    const intercomSecret = process.env.INTERCOM_WEBHOOK_SECRET || "";
 
-    // Debug: Log incoming webhook data
-
-    // Verify webhook signature (temporarily disabled for testing)
-    // if (signature && !verifyIntercomWebhook(payload, signature.replace("sha256=", ""), intercomSecret)) {
-    //   return res.status(401).json({ error: "Invalid signature" });
-    // }
+    // Verify webhook signature
+    if (
+      !signature ||
+      !intercomSecret ||
+      !verifyIntercomWebhook(
+        payload,
+        signature.replace("sha256=", ""),
+        intercomSecret,
+      )
+    ) {
+      return res.status(401).json({ error: "Invalid signature" });
+    }
 
     const webhookData = req.body as IntercomWebhookPayload;
     const service = new IntercomSlackService();

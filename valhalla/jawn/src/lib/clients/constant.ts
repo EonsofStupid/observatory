@@ -16,7 +16,14 @@ type keySlug =
   | "key:helicone_on_helicone_key"
   | "key:openai"
   | "key:openrouter"
-  | "key:together_ai";
+  | "key:together_ai"
+  | "key:helix_prompt_id"
+  | "key:mintlify_mcp_tool"
+  | "key:slack_bot_token"
+  | "key:slack_app_token"
+  | "key:slack_channel"
+  | "key:slack_user_token"
+  | "key:loops";
 
 const getKey = (key: string) => {
   if (process.env.PROVIDER_KEYS) {
@@ -38,12 +45,36 @@ export const GET_KEY = async (key: keySlug) => {
     return apiKey.data;
   }
 
+  if (key === "key:helicone_on_helicone_key") {
+    return process.env.HELICONE_ON_HELICONE;
+  }
+
+  if (key === "key:helix_prompt_id") {
+    return process.env.HELICONE_PROMPT_ID;
+  }
+
   if (key === "key:openai") {
     return getOpenAIKey();
   }
 
   if (key === "key:openrouter") {
     return getKey("OPENROUTER_API_KEY");
+  }
+
+  if (key === "key:slack_bot_token") {
+    return process.env.HELICONE_IN_APP_SLACK_BOT_TOKEN;
+  }
+
+  if (key === "key:slack_app_token") {
+    return process.env.HELICONE_IN_APP_SLACK_APP_TOKEN;
+  }
+
+  if (key === "key:slack_channel") {
+    return process.env.HELICONE_IN_APP_SLACK_CHANNEL;
+  }
+
+  if (key === "key:slack_user_token") {
+    return process.env.HELICONE_IN_APP_SLACK_USER_TOKEN;
   }
 
   return null;

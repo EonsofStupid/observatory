@@ -16,6 +16,7 @@ import {
   SessionMetrics,
   SessionNameResult,
   SessionResult,
+  SessionsAggregateMetrics,
 } from "../../managers/SessionManager";
 import { err, ok, Result } from "../../packages/common/result";
 import { type JawnAuthenticatedRequest } from "../../types/request";
@@ -42,6 +43,8 @@ export interface SessionQueryParams {
   nameEquals?: string;
   timezoneDifference: number;
   filter: SessionFilterNode;
+  offset?: number;
+  limit?: number;
 }
 
 export interface SessionNameQueryParams {
@@ -68,45 +71,6 @@ const kvCache = new KVCache(60 * 1000); // 5 minutes
 @Tags("Session")
 @Security("api_key")
 export class SessionController extends Controller {
-  @Get("/has-session")
-  public async hasSession(
-    @Request() request: JawnAuthenticatedRequest
-  ): Promise<Result<boolean, string>> {
-    const found = await cacheResultCustom<boolean, string>(
-      `has-session-${request.authParams.organizationId}`,
-      async () => {
-        const sessionManager = new SessionManager(request.authParams);
-        const result = await sessionManager.getSessions({
-          filter: "all",
-          search: "",
-          timeFilter: {
-            startTimeUnixMs: new Date().getTime() - 1000 * 60 * 60 * 30,
-            endTimeUnixMs: new Date().getTime(),
-          },
-          timezoneDifference: 0,
-        });
-        if (result.error || !result.data) {
-          return err("Error finding sessions");
-        } else {
-          if (result.data.length > 0) {
-            return ok(true);
-          } else {
-            return err("No sessions found");
-          }
-        }
-      },
-      kvCache
-    );
-    if (found.error) {
-      console.error("Error finding sessions", found.error);
-      this.setStatus(500);
-    } else {
-      this.setStatus(200);
-    }
-
-    return found;
-  }
-
   @Post("query")
   public async getSessions(
     @Body()
@@ -116,6 +80,23 @@ export class SessionController extends Controller {
     const sessionManager = new SessionManager(request.authParams);
 
     const result = await sessionManager.getSessions(requestBody);
+    if (result.error || !result.data) {
+      this.setStatus(500);
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+
+  @Post("count")
+  public async getSessionsCount(
+    @Body()
+    requestBody: SessionQueryParams,
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<SessionsAggregateMetrics, string>> {
+    const sessionManager = new SessionManager(request.authParams);
+
+    const result = await sessionManager.getSessionsCount(requestBody);
     if (result.error || !result.data) {
       this.setStatus(500);
     } else {

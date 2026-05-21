@@ -1,69 +1,58 @@
-import { ProviderName } from "../../../providers";
+import { ModelProviderName } from "../../../providers";
 import type { ModelProviderConfig } from "../../../types";
 import { O1ModelName } from "./models";
 
 export const endpoints = {
-  "o1:openai": {
-    provider: "openai",
-    providerModelId: "o1",
-    pricing: {
-      prompt: 0.000015,
-      completion: 0.00006,
-      image: 0.000000021675,
-      cacheRead: 0.0000075,
-    },
+  "o1:helicone": {
+    provider: "helicone",
+    author: "openai",
+    providerModelId: "pa/p1",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000015, // $15.00 per 1M tokens
+        output: 0.00006, // $60.00 per 1M tokens
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.5, // $7.50 per 1M tokens
+        },
+      },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 100000,
     supportedParameters: [
-      "tools",
-      "tool_choice",
-      "seed",
       "max_tokens",
-      "response_format",
     ],
     ptbEnabled: true,
     endpointConfigs: {
       "*": {},
     },
   },
-  "o1-pro:openai": {
-    provider: "openai",
-    providerModelId: "o1-pro",
-    pricing: {
-      prompt: 0.000015,
-      completion: 0.00006,
-      cacheRead: 0.0000075,
-    },
-    contextLength: 200000,
-    maxCompletionTokens: 100000,
-    supportedParameters: [
-      "tools",
-      "tool_choice",
-      "seed",
-      "max_tokens",
-      "response_format",
+  "o1-mini:helicone": {
+    provider: "helicone",
+    author: "openai",
+    providerModelId: "pa/p1-m",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.0000011, // $1.10 per 1M tokens
+        output: 0.0000044, // $4.40 per 1M tokens
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.5, // $0.55 per 1M tokens
+        },
+      },
     ],
-    ptbEnabled: true,
-    endpointConfigs: {
-      "*": {},
-    },
-  },
-  "o1-mini:openai": {
-    provider: "openai",
-    providerModelId: "o1-mini",
-    pricing: {
-      prompt: 0.0000011,
-      completion: 0.0000044,
-      cacheRead: 0.00000055,
-    },
     contextLength: 128000,
     maxCompletionTokens: 65536,
-    supportedParameters: ["seed", "max_tokens"],
+    supportedParameters: [
+      "max_tokens",
+    ],
     ptbEnabled: true,
     endpointConfigs: {
       "*": {},
     },
   },
 } satisfies Partial<
-  Record<`${O1ModelName}:${ProviderName}`, ModelProviderConfig>
+  Record<`${O1ModelName}:${ModelProviderName}`, ModelProviderConfig>
 >;

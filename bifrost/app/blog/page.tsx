@@ -221,6 +221,51 @@ export type BlogStructure =
 export const BLOG_CONTENT: BlogStructure[] = [
   {
     dynmaicEntry: {
+      folderName: "joining-mintlify",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "ptb-gateway-launch",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "mcp-blog",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "what-is-ai-gateway",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "openrouter-alternatives",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "how-to-gateway",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "n8n-helicone-node",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "export-logs",
+    },
+  },
+  {
+    dynmaicEntry: {
+      folderName: "migration-openrouter",
+    },
+  },
+  {
+    dynmaicEntry: {
       folderName: "how-ai-gateways-enhance-app-reliability",
     },
   },

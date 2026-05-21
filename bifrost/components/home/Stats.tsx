@@ -1,37 +1,66 @@
 "use client";
 
 import { ISLAND_WIDTH } from "@/lib/utils";
-import Link from "next/link";
-// import { humanReadableNumber } from "@/app/utils/formattingUtils";
 import { cn } from "@/lib/utils";
-import { ArrowUpRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Button } from "../ui/button";
 
-function humanReadableNumber(num: number): string {
-  if (num >= 1_000_000_000_000) {
-    return `${Math.ceil(num / 1_000_000_000_00) / 10} trillion`;
-  } else if (num >= 1_000_000_000) {
-    return `${Math.ceil(num / 1_000_000_00) / 10} billion`;
-  } else if (num >= 1_000_000) {
-    return `${Math.ceil(num / 1_000_00) / 10}M+`;
-  } else if (num >= 1_000) {
-    return `${Math.ceil(num / 100) / 10}k+`;
+// Baseline date: January 6, 2025 (UTC)
+const BASELINE_DATE = new Date("2025-01-06T00:00:00Z");
+
+// Baseline values (update these periodically with real numbers)
+const BASELINE_REQUESTS = 4_855_213_721; // ~4.9 billion
+const BASELINE_TOKENS_TRILLION = 1.1; // ~1.1 trillion tokens per month
+const BASELINE_USERS = 28_645_282; // ~28.6 million
+
+// Growth rates
+const REQUESTS_PER_DAY = 10_000_000; // 10 million per day
+const MONTHLY_GROWTH_RATE = 0.05; // 5% MoM for tokens and users
+
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+const DAYS_PER_MONTH = 30.44; // Average days per month
+
+function getGrowthMetrics() {
+  const now = new Date();
+  const daysSinceBaseline = Math.floor(
+    (now.getTime() - BASELINE_DATE.getTime()) / MS_PER_DAY
+  );
+  const monthsSinceBaseline = daysSinceBaseline / DAYS_PER_MONTH;
+
+  return {
+    requests: BASELINE_REQUESTS + daysSinceBaseline * REQUESTS_PER_DAY,
+    tokensTrillion:
+      BASELINE_TOKENS_TRILLION * Math.pow(1 + MONTHLY_GROWTH_RATE, monthsSinceBaseline),
+    users: BASELINE_USERS * Math.pow(1 + MONTHLY_GROWTH_RATE, monthsSinceBaseline),
+  };
+}
+
+function formatRequests(num: number): string {
+  if (num >= 1_000_000_000) {
+    return `${(num / 1_000_000_000).toFixed(1)} billion`;
   }
   return num.toLocaleString();
 }
 
-const Stats = ({
-  totalValuesData,
-}: {
-  totalValuesData?: {
-    total_requests?: number;
-    total_tokens?: number;
-    total_cost?: number;
-  };
-}) => {
+function formatTokens(trillions: number): string {
+  return `${trillions.toFixed(1)} Trillion`;
+}
+
+function formatUsers(num: number): string {
+  if (num >= 1_000_000) {
+    return `${(num / 1_000_000).toFixed(1)} million`;
+  }
+  return num.toLocaleString();
+}
+
+const Stats = () => {
   const [isVisible, setIsVisible] = useState(false);
+  const [metrics, setMetrics] = useState<ReturnType<typeof getGrowthMetrics> | null>(null);
   const elementRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Only compute metrics on client to avoid SSR hydration mismatch
+    setMetrics(getGrowthMetrics());
+  }, []);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -56,10 +85,10 @@ const Stats = ({
       <div
         className={cn(
           ISLAND_WIDTH,
-          "flex justify-between items-start pt-0 pb-32"
+          "flex justify-between items-start pt-8 md:pt-12 pb-12 md:pb-16"
         )}
       >
-        <h1 className="gap-y-4 text-3xl md:text-6xl font-semibold !leading-[150%] text-black max-w-[1100px] text-wrap">
+        <h1 className="gap-y-4 text-2xl md:text-6xl font-semibold !leading-[150%] text-black max-w-[1100px] text-wrap">
           Today,{" "}
           <span
             ref={elementRef}
@@ -68,27 +97,12 @@ const Stats = ({
               isVisible ? "rotate-[-3deg]" : "rotate-[0  deg]"
             )}
           >
-            {humanReadableNumber(totalValuesData?.total_requests ?? 0)}
+            {formatRequests(metrics?.requests ?? BASELINE_REQUESTS)}
           </span>{" "}
           requests processed,{" "}
-          <span className="text-brand">
-            {humanReadableNumber(totalValuesData?.total_tokens ?? 0)}
-          </span>{" "}
-          tokens logged and <span className="text-brand">18.3 million</span>{" "}
-          users tracked
+          <span className="text-brand">{formatTokens(metrics?.tokensTrillion ?? BASELINE_TOKENS_TRILLION)}</span> tokens a month,{" "}
+          <span className="text-brand">{formatUsers(metrics?.users ?? BASELINE_USERS)}</span> users tracked
         </h1>
-        <div className="flex gap-2 items-center md:gap-4">
-          <Link href="https://us.helicone.ai/open-stats" target="_blank" rel="noopener">
-            <Button
-              variant="ghost"
-              size="landing_page"
-              className="hover:bg-brand hover:border-brand hover:text-white p-5 text-base md:text-2xl md:py-4 lg:py-6 lg:px-6 lg:text-md gap-2 rounded-lg items-center z-[10]"
-            >
-              Live
-              <ArrowUpRight className="size-5 md:size-6" />
-            </Button>
-          </Link>
-        </div>
       </div>
     </div>
   );

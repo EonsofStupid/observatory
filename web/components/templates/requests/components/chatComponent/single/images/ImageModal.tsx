@@ -18,7 +18,6 @@ export const ImageModal: React.FC<ImageModalProps> = ({
 }) => {
   // Store the original overflow value to restore it later
   const originalOverflowRef = useRef<string | null>(null);
-
   // Handle escape key
   const handleEscape = useCallback(
     (e: KeyboardEvent) => {
@@ -142,6 +141,7 @@ export const ImageModal: React.FC<ImageModalProps> = ({
                   justifyContent: "center",
                 }}
               >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={imageSrc}
                   alt={alt}

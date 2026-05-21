@@ -9,8 +9,13 @@ import {
   Put,
   Path,
   Delete,
+  Security,
 } from "tsoa";
-import { err, ok, Result } from "../../packages/common/result";
+import { err, ok, Result, isError } from "../../packages/common/result";
+import {
+  HqlErrorCode,
+  createHqlError
+} from "../../lib/errors/HqlErrors";
 import { HeliconeSqlManager } from "../../managers/HeliconeSqlManager";
 import { type JawnAuthenticatedRequest } from "../../types/request";
 import {
@@ -18,6 +23,7 @@ import {
   HQL_FEATURE_FLAG,
 } from "../../lib/utils/featureFlags";
 import { HqlQueryManager } from "../../managers/HqlQueryManager";
+import { TracedController } from "../../lib/decorators/tracing";
 
 // --- Response Types ---
 export interface ClickHouseTableSchema {
@@ -44,8 +50,14 @@ export interface CreateSavedQueryRequest {
   sql: string;
 }
 
-export interface UpdateSavedQueryRequest extends CreateSavedQueryRequest {
+export interface UpdateSavedQueryRequest {
   id: string;
+  name: string;
+  sql: string;
+}
+
+export interface BulkDeleteSavedQueriesRequest {
+  ids: string[];
 }
 
 export interface HqlSavedQuery {
@@ -64,131 +76,301 @@ export type ExecuteSqlResponse = {
   rowCount: number;
 };
 
+// Type that matches what TracedController expects
+type TracedControllerError = { statusCode?: number; code?: string; message: string; details?: string };
+
+// Helper function to convert HqlError to string for API responses
+function formatHqlError(error: TracedControllerError): string {
+  // Handle undefined/null errors
+  if (!error) {
+    return 'An unexpected error occurred';
+  }
+  // Handle error objects
+  const codePrefix = error.code ? `[${error.code}] ` : '';
+  const message = error.details ? `${error.message}: ${error.details}` : error.message;
+  return `${codePrefix}${message}`;
+}
+
+// Formatter for TracedController decorator - matches expected type signature
+function formatTracedError(error: { statusCode?: number; code?: string; message: string }): string {
+  const codePrefix = error.code ? `[${error.code}] ` : '';
+  return `${codePrefix}${error.message}`;
+}
+
 @Route("v1/helicone-sql")
 @Tags("HeliconeSql")
 export class HeliconeSqlController extends Controller {
   /**
    * Get ClickHouse schema (tables and columns)
+   * @summary Get database schema
+   * @returns {ClickHouseTableSchema[]} Array of table schemas with columns
    */
+  @Security("api_key")
   @Get("schema")
+  @TracedController("hql.controller.getClickHouseSchema", {
+    baseTags: ({ args }) => {
+      const [request] = args as [JawnAuthenticatedRequest];
+      return {
+        organizationId: request.authParams.organizationId,
+        component: "hql",
+        "operation.name": "getClickHouseSchema",
+        "span.kind": "server",
+      };
+    },
+    formatError: formatTracedError,
+    successStatus: 200,
+  })
   public async getClickHouseSchema(
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<ClickHouseTableSchema[], string>> {
     const heliconeSqlManager = new HeliconeSqlManager(request.authParams);
-    return heliconeSqlManager.getClickhouseSchema();
+    const result = await heliconeSqlManager.getClickhouseSchema();
+    if (isError(result)) {
+      return err(formatHqlError(result.error));
+    }
+    return ok(result.data);
   }
 
+  /**
+   * Execute a SQL query against ClickHouse
+   * @summary Execute SQL query
+   * @param requestBody The SQL query to execute
+   * @returns {ExecuteSqlResponse} Query results with rows and metadata
+   */
+  @Security("api_key")
   @Post("execute")
+  @TracedController("hql.controller.executeSql", {
+    baseTags: ({ args }) => {
+      const [requestBody, request] = args as [ExecuteSqlRequest, JawnAuthenticatedRequest];
+      return {
+        organizationId: request.authParams.organizationId,
+        service: "helicone-sql",
+        operation: "executeSql",
+        "sql.length": requestBody.sql?.length || 0,
+      };
+    },
+    formatError: formatTracedError,
+    successStatus: 200,
+  })
   public async executeSql(
     @Body() requestBody: ExecuteSqlRequest,
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<ExecuteSqlResponse, string>> {
+    // Feature flag
     const featureFlagResult = await checkFeatureFlag(
       request.authParams.organizationId,
       HQL_FEATURE_FLAG
     );
-    if (featureFlagResult.error) {
-      return err(featureFlagResult.error);
+    if (isError(featureFlagResult)) {
+      const error = createHqlError(HqlErrorCode.FEATURE_NOT_ENABLED);
+      this.setStatus(403);
+      return err(formatHqlError(error));
+    }
+
+    // Validate input
+    if (!requestBody.sql?.trim()) {
+      const error = createHqlError(HqlErrorCode.MISSING_QUERY_SQL);
+      this.setStatus(400);
+      return err(formatHqlError(error));
     }
 
     const heliconeSqlManager = new HeliconeSqlManager(request.authParams);
     const result = await heliconeSqlManager.executeSql(requestBody.sql);
-    if (result.error || !result.data) {
-      this.setStatus(500);
-      return err(result.error);
+    if (isError(result)) {
+      this.setStatus(result.error.statusCode || 500);
+      return err(formatHqlError(result.error));
     }
-
-    this.setStatus(200);
     return ok(result.data);
   }
 
+  /**
+   * Execute a SQL query and download results as CSV
+   * @summary Download query results as CSV
+   * @param requestBody The SQL query to execute
+   * @returns {string} URL to download the CSV file
+   */
+  @Security("api_key")
   @Post("download")
+  @TracedController("hql.controller.downloadCsv", {
+    baseTags: ({ args }) => {
+      const [requestBody, request] = args as [ExecuteSqlRequest, JawnAuthenticatedRequest];
+      return {
+        organizationId: request.authParams.organizationId,
+        service: "helicone-sql",
+        operation: "downloadCsv",
+        "sql.length": requestBody.sql?.length || 0,
+      };
+    },
+    formatError: formatTracedError,
+    successStatus: 200,
+  })
   public async downloadCsv(
     @Body() requestBody: ExecuteSqlRequest,
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<string, string>> {
-    const heliconeSqlManager = new HeliconeSqlManager(request.authParams);
-    const result = await heliconeSqlManager.downloadCsv(requestBody.sql);
-    if (result.error || !result.data) {
-      this.setStatus(500);
-      return err(result.error ?? "Failed to download csv");
+    // Feature flag
+    const featureFlagResult = await checkFeatureFlag(
+      request.authParams.organizationId,
+      HQL_FEATURE_FLAG
+    );
+    if (isError(featureFlagResult)) {
+      const error = createHqlError(HqlErrorCode.FEATURE_NOT_ENABLED);
+      return err(formatHqlError(error));
     }
 
-    this.setStatus(200);
+    // Validate request
+    if (!requestBody.sql?.trim()) {
+      const error = createHqlError(HqlErrorCode.MISSING_QUERY_SQL, "CSV download requires a SQL query");
+      return err(formatHqlError(error));
+    }
+
+    const heliconeSqlManager = new HeliconeSqlManager(request.authParams);
+    const result = await heliconeSqlManager.downloadCsv(requestBody.sql);
+    if (isError(result)) {
+      return err(formatHqlError(result.error));
+    }
     return ok(result.data);
   }
 
+  /**
+   * Get all saved queries for the organization
+   * @summary List saved queries
+   * @returns {HqlSavedQuery[]} Array of saved queries
+   */
+  @Security("api_key")
   @Get("saved-queries")
   public async getSavedQueries(
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<Array<HqlSavedQuery>, string>> {
-    const heliconeSqlManager = new HqlQueryManager(request.authParams);
-    const res = await heliconeSqlManager.getSavedQueries();
-    if (res.error) {
-      this.setStatus(500);
-      return err(res.error);
+    const hqlQueryManager = new HqlQueryManager(request.authParams);
+    const res = await hqlQueryManager.getSavedQueries();
+    
+    if (isError(res)) {
+      this.setStatus(res.error.statusCode || 500);
+      return err(formatHqlError(res.error));
     }
+    
     this.setStatus(200);
     return ok(res.data || []);
   }
 
+  /**
+   * Get a specific saved query by ID
+   * @summary Get saved query
+   * @param queryId The ID of the saved query
+   * @returns {HqlSavedQuery} The saved query details
+   */
+  @Security("api_key")
   @Get("saved-query/{queryId}")
   public async getSavedQuery(
     @Path() queryId: string,
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<HqlSavedQuery | null, string>> {
-    const heliconeSqlManager = new HqlQueryManager(request.authParams);
-    const result = await heliconeSqlManager.getSavedQuery(queryId);
-    if (result.error) {
-      this.setStatus(500);
-      return err(result.error);
+    const hqlQueryManager = new HqlQueryManager(request.authParams);
+    const result = await hqlQueryManager.getSavedQuery(queryId);
+    
+    if (isError(result)) {
+      this.setStatus(result.error.statusCode || 500);
+      return err(formatHqlError(result.error));
     }
 
     this.setStatus(200);
     return ok(result.data);
   }
 
+  /**
+   * Delete a saved query by ID
+   * @summary Delete saved query
+   * @param queryId The ID of the saved query to delete
+   */
+  @Security("api_key")
   @Delete("saved-query/{queryId}")
   public async deleteSavedQuery(
     @Path() queryId: string,
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<void, string>> {
-    const heliconeSqlManager = new HqlQueryManager(request.authParams);
-    const result = await heliconeSqlManager.deleteSavedQuery(queryId);
-    if (result.error) {
-      this.setStatus(500);
-      return err(result.error);
+    const hqlQueryManager = new HqlQueryManager(request.authParams);
+    const result = await hqlQueryManager.deleteSavedQuery(queryId);
+    
+    if (isError(result)) {
+      this.setStatus(result.error.statusCode || 500);
+      return err(formatHqlError(result.error));
+    }
+    
+    this.setStatus(204);
+    return ok(undefined);
+  }
+
+  /**
+   * Delete multiple saved queries at once
+   * @summary Bulk delete saved queries
+   * @param requestBody Array of query IDs to delete
+   */
+  @Security("api_key")
+  @Post("saved-queries/bulk-delete")
+  public async bulkDeleteSavedQueries(
+    @Body() requestBody: BulkDeleteSavedQueriesRequest,
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<void, string>> {
+    const hqlQueryManager = new HqlQueryManager(request.authParams);
+    const result = await hqlQueryManager.bulkDeleteSavedQueries(requestBody.ids);
+    if (isError(result)) {
+      this.setStatus(result.error.statusCode || 500);
+      return err(formatHqlError(result.error));
     }
     this.setStatus(200);
     return ok(undefined);
   }
 
+  /**
+   * Create a new saved query
+   * @summary Create saved query
+   * @param requestBody The saved query details
+   * @returns {HqlSavedQuery[]} Array containing the created saved query
+   */
+  @Security("api_key")
   @Post("saved-query")
   public async createSavedQuery(
     @Body() requestBody: CreateSavedQueryRequest,
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<HqlSavedQuery[], string>> {
-    const heliconeSqlManager = new HqlQueryManager(request.authParams);
-    const result = await heliconeSqlManager.createSavedQuery(requestBody);
-    if (result.error || !result.data) {
-      this.setStatus(500);
-      return err(result.error || "Error creating saved query");
+    const hqlQueryManager = new HqlQueryManager(request.authParams);
+    const result = await hqlQueryManager.createSavedQuery(requestBody);
+    
+    if (isError(result)) {
+      this.setStatus(result.error.statusCode || 500);
+      return err(formatHqlError(result.error));
     }
-    this.setStatus(200);
+    
+    this.setStatus(201);
     return ok(result.data);
   }
 
-  @Put("saved-query")
+  /**
+   * Update an existing saved query
+   * @summary Update saved query
+   * @param queryId The ID of the saved query to update
+   * @param requestBody The updated query details
+   * @returns {HqlSavedQuery} The updated saved query
+   */
+  @Security("api_key")
+  @Put("saved-query/{queryId}")
   public async updateSavedQuery(
-    @Body() requestBody: UpdateSavedQueryRequest,
+    @Path() queryId: string,
+    @Body() requestBody: CreateSavedQueryRequest,
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<HqlSavedQuery, string>> {
-    const heliconeSqlManager = new HqlQueryManager(request.authParams);
-    const result = await heliconeSqlManager.updateSavedQuery(requestBody);
-    if (result.error || !result.data) {
-      this.setStatus(500);
-      return err(result.error);
+    const hqlQueryManager = new HqlQueryManager(request.authParams);
+    const result = await hqlQueryManager.updateSavedQuery({
+      id: queryId,
+      ...requestBody
+    });
+    
+    if (isError(result)) {
+      this.setStatus(result.error.statusCode || 500);
+      return err(formatHqlError(result.error));
     }
+    
     this.setStatus(200);
     return ok(result.data);
   }

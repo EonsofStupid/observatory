@@ -69,6 +69,11 @@ import StreamWarning from "./StreamWarning";
 import TableFooter from "./tableFooter";
 import UnauthorizedView from "./UnauthorizedView";
 import useRequestsPageV2 from "./useRequestsPageV2";
+import { useHeliconeAgent } from "../agent/HeliconeAgentContext";
+import { useFilterUIDefinitions } from "@/filterAST/filterUIDefinitions/useFilterUIDefinitions";
+import { FilterUIDefinition } from "@/filterAST/filterUIDefinitions/types";
+import { FilterAST } from "@/filterAST/filterAst";
+import { GET_FILTER_ARGS_TOOL_CONTEXT } from "@/lib/agent/tools";
 
 interface RequestsPageV2Props {
   currentPage: number;
@@ -158,11 +163,14 @@ export default function RequestsPage(props: RequestsPageV2Props) {
       }
     : "all";
 
+  // Get the default time filter from org settings, fallback to "7d"
+  const defaultTimeFilter = (orgContext?.currentOrg?.default_time_filter ?? "7d") as TimeInterval;
+
   // filter when custom is not selected
   const defaultFilter = useMemo<FilterNode>(() => {
     const currentTimeFilter = searchParams.get("t");
     const timeIntervalDate = getTimeIntervalAgo(
-      (currentTimeFilter as TimeInterval) || "1m",
+      (currentTimeFilter as TimeInterval) || defaultTimeFilter,
     );
     return {
       left: {
@@ -175,7 +183,7 @@ export default function RequestsPage(props: RequestsPageV2Props) {
       operator: "and",
       right: cacheFilter,
     };
-  }, [cacheFilter]);
+  }, [cacheFilter, defaultTimeFilter]);
 
   // TODO: Move this to a better place or turn into callback
   const getTimeFilter = () => {
@@ -184,28 +192,44 @@ export default function RequestsPage(props: RequestsPageV2Props) {
     if (currentTimeFilter && currentTimeFilter.split("_")[0] === "custom") {
       const [_, start, end] = currentTimeFilter.split("_");
 
-      const filter: FilterNode = {
-        left: {
-          request_response_rmt: {
-            request_created_at: {
-              gte: new Date(start),
-            },
-          },
-        },
-        operator: "and",
-        right: {
+      // When live mode is on, don't set an upper bound so new data can appear
+      if (isLive) {
+        const filter: FilterNode = {
           left: {
             request_response_rmt: {
               request_created_at: {
-                lte: new Date(end),
+                gte: new Date(start),
               },
             },
           },
           operator: "and",
           right: cacheFilter,
-        },
-      };
-      return filter;
+        };
+        return filter;
+      } else {
+        const filter: FilterNode = {
+          left: {
+            request_response_rmt: {
+              request_created_at: {
+                gte: new Date(start),
+              },
+            },
+          },
+          operator: "and",
+          right: {
+            left: {
+              request_response_rmt: {
+                request_created_at: {
+                  lte: new Date(end),
+                },
+              },
+            },
+            operator: "and",
+            right: cacheFilter,
+          },
+        };
+        return filter;
+      }
     } else {
       return defaultFilter;
     }
@@ -217,7 +241,7 @@ export default function RequestsPage(props: RequestsPageV2Props) {
     if (currentTimeFilter && currentTimeFilter.split("_")[0] === "custom") {
       const start = currentTimeFilter.split("_")[1]
         ? new Date(currentTimeFilter.split("_")[1])
-        : getTimeIntervalAgo("1m");
+        : getTimeIntervalAgo(defaultTimeFilter);
       const end = new Date(currentTimeFilter.split("_")[2] || new Date());
       range = {
         start,
@@ -225,13 +249,21 @@ export default function RequestsPage(props: RequestsPageV2Props) {
       };
     } else {
       range = {
-        start: getTimeIntervalAgo((currentTimeFilter as TimeInterval) || "1m"),
+        start: getTimeIntervalAgo((currentTimeFilter as TimeInterval) || defaultTimeFilter),
         end: new Date(),
       };
     }
     return range;
   };
   const [timeFilter, setTimeFilter] = useState<FilterNode>(getTimeFilter());
+
+  // Update time filter when org's default changes and no URL param is set
+  useEffect(() => {
+    const currentTimeFilter = searchParams.get("t");
+    if (!currentTimeFilter && orgContext?.currentOrg?.default_time_filter) {
+      setTimeFilter(defaultFilter);
+    }
+  }, [orgContext?.currentOrg?.default_time_filter, defaultFilter]);
 
   // TODO: Should this ever use states?
   const sortLeaf: SortLeafRequest = getSortLeaf(
@@ -263,6 +295,65 @@ export default function RequestsPage(props: RequestsPageV2Props) {
     isLive,
     rateLimited,
   );
+
+  const { setToolHandler } = useHeliconeAgent();
+  const { filterDefinitions } = useFilterUIDefinitions();
+
+  const [allowedFilterDefinitions, setAllowedFilterDefinitions] = useState<
+    FilterUIDefinition[] | null
+  >(null);
+
+  useEffect(() => {
+    if (allowedFilterDefinitions || filterDefinitions.length === 0) return;
+    setAllowedFilterDefinitions(filterDefinitions);
+  }, [filterDefinitions]);
+
+  const { helpers } = useFilterAST();
+  useEffect(() => {
+    setToolHandler("get-filter-args", async () => {
+      const filterDefs = allowedFilterDefinitions?.filter(
+        (def) => def.table === "request_response_rmt",
+      );
+
+      const EXTRA_CONTEXT = `
+      The following are the filter definitions for the requests page:
+      ${JSON.stringify(filterDefs)}
+      ${GET_FILTER_ARGS_TOOL_CONTEXT}
+      `;
+
+      return {
+        success: true,
+        message: EXTRA_CONTEXT,
+      };
+    });
+
+    setToolHandler("set-filters", async (args: { filter: any }) => {
+      try {
+        const filterNode =
+          typeof args.filter === "string"
+            ? JSON.parse(args.filter)
+            : args.filter;
+        filterStore.setFilter(FilterAST.and(filterNode));
+        return {
+          success: true,
+          message: "Filters set successfully",
+        };
+      } catch (error) {
+        return {
+          success: false,
+          message: `Failed to parse filters: ${error}`,
+        };
+      }
+    });
+    setToolHandler("save-current-filter", async () => {
+      helpers.saveFilter();
+      return {
+        success: true,
+        message: "Filter saved successfully",
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedFilterDefinitions]);
 
   /* -------------------------------------------------------------------------- */
   /*                                    MEMOS                                   */
@@ -465,28 +556,44 @@ export default function RequestsPage(props: RequestsPageV2Props) {
     (key: TimeInterval, value: string) => {
       if (key === "custom") {
         const [start, end] = value.split("_");
-        const filter: FilterNode = {
-          left: {
-            request_response_rmt: {
-              request_created_at: {
-                gte: new Date(start),
-              },
-            },
-          },
-          operator: "and",
-          right: {
+        // When live mode is on, don't set an upper bound so new data can appear
+        if (isLive) {
+          const filter: FilterNode = {
             left: {
               request_response_rmt: {
                 request_created_at: {
-                  lte: new Date(end),
+                  gte: new Date(start),
                 },
               },
             },
             operator: "and",
             right: cacheFilter,
-          },
-        };
-        setTimeFilter(filter);
+          };
+          setTimeFilter(filter);
+        } else {
+          const filter: FilterNode = {
+            left: {
+              request_response_rmt: {
+                request_created_at: {
+                  gte: new Date(start),
+                },
+              },
+            },
+            operator: "and",
+            right: {
+              left: {
+                request_response_rmt: {
+                  request_created_at: {
+                    lte: new Date(end),
+                  },
+                },
+              },
+              operator: "and",
+              right: cacheFilter,
+            },
+          };
+          setTimeFilter(filter);
+        }
       } else {
         setTimeFilter({
           request_response_rmt: {
@@ -497,7 +604,7 @@ export default function RequestsPage(props: RequestsPageV2Props) {
         });
       }
     },
-    [isCached, setTimeFilter],
+    [isCached, isLive, setTimeFilter],
   );
 
   // if shift is pressed, we select the rows in the highlighted range
@@ -546,6 +653,15 @@ export default function RequestsPage(props: RequestsPageV2Props) {
   /* -------------------------------------------------------------------------- */
   /*                                   EFFECTS                                  */
   /* -------------------------------------------------------------------------- */
+  // When isLive changes, re-apply the time filter to add/remove upper bound
+  useEffect(() => {
+    const currentTimeFilter = searchParams.get("t");
+    if (currentTimeFilter && currentTimeFilter.split("_")[0] === "custom") {
+      const [, start, end] = currentTimeFilter.split("_");
+      onTimeSelectHandler("custom" as TimeInterval, `${start}_${end}`);
+    }
+  }, [isLive]);
+
   // Synchronize page state from URL query parameters
   useEffect(() => {
     const pageFromQuery = router.query.page;
@@ -635,10 +751,18 @@ export default function RequestsPage(props: RequestsPageV2Props) {
                 isFetching={false}
                 defaultValue={getDefaultValue()}
                 custom={true}
+                isLive={isLive}
+                hasCustomTimeFilter={
+                  searchParams.get("t")?.startsWith("custom_") || false
+                }
+                onClearTimeFilter={() => {
+                  searchParams.delete("t");
+                  setTimeFilter(defaultFilter);
+                }}
               />
 
               {/* Filter AST Button */}
-              <FilterASTButton />
+              <FilterASTButton showCurlButton={true} />
             </div>
           }
           rightActions={
@@ -735,7 +859,7 @@ export default function RequestsPage(props: RequestsPageV2Props) {
                 !userId
                   ? {
                       currentTimeFilter: timeRange,
-                      defaultValue: "1m",
+                      defaultValue: (orgContext?.currentOrg?.default_time_filter ?? "7d") as "24h" | "7d" | "1m" | "3m" | "all",
                       onTimeSelectHandler: onTimeSelectHandler,
                     }
                   : undefined

@@ -1,6 +1,6 @@
 import React from "react";
-import { ConditionExpression, FilterOperator } from "../filterAst";
-import { useFilterStore } from "../store/filterStore";
+import { ConditionExpression, FilterOperator } from "@helicone-package/filters/types";
+import { useFilterAST } from "../context/filterContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ChevronDown, Trash2, Loader2 } from "lucide-react";
@@ -33,6 +33,7 @@ const FILTER_OPERATOR_LABELS: Record<FilterOperator, string> = {
   like: "~",
   ilike: "≈",
   contains: "⊃",
+  "not-contains": "⊅",
   in: "∈",
 };
 
@@ -48,6 +49,7 @@ const FILTER_OPERATOR_DESCRIPTIVE_LABELS: Record<FilterOperator, string> = {
   like: "Like (~)",
   ilike: "Case Insensitive Like (≈)",
   contains: "Contains (⊃)",
+  "not-contains": "Not Contains (⊅)",
   in: "In (∈)",
 };
 
@@ -66,50 +68,26 @@ const NumberInput: React.FC<{
   className = "",
 }) => {
   const [open, setOpen] = React.useState(false);
+  const [inputValue, setInputValue] = React.useState(value.toString());
   const containerRef = React.useRef<HTMLDivElement>(null);
 
-  // Format display value to remove leading zeros but preserve decimals
-  const formatDisplayValue = (val: string | number): string => {
-    if (val === 0 || val === "0") return "0";
-
-    if (typeof val === "string") {
-      // If it's a string with leading zeros (not a decimal)
-      if (val.startsWith("0") && val.length > 1 && val[1] !== ".") {
-        return parseFloat(val).toString();
-      }
-    }
-    return val.toString();
-  };
+  React.useEffect(() => {
+    setInputValue(value.toString());
+  }, [value]);
 
   // Handle direct input changes
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const inputValue = e.target.value;
+    const newValue = e.target.value;
+    setInputValue(newValue);
 
     // For empty input, use 0
-    if (inputValue === "") {
+    if (newValue === "") {
       onValueChange(0);
       return;
     }
 
-    // If it has leading zeros (but is not a decimal), remove them
-    if (
-      inputValue.startsWith("0") &&
-      inputValue.length > 1 &&
-      inputValue[1] !== "."
-    ) {
-      const cleanValue = inputValue.replace(/^0+/, "");
-      const numericValue = Number(cleanValue);
-      if (!isNaN(numericValue)) {
-        onValueChange(numericValue);
-      }
-      return;
-    }
-
-    // Parse the input as a number
-    const numericValue = Number(inputValue);
-
-    // Only update if it's a valid number
-    if (!isNaN(numericValue)) {
+    const numericValue = Number(newValue);
+    if (!isNaN(numericValue) && newValue !== "" && !newValue.endsWith('.')) {
       onValueChange(numericValue);
     }
   };
@@ -147,8 +125,8 @@ const NumberInput: React.FC<{
     <div className="relative w-full" ref={containerRef}>
       <div className="flex">
         <Input
-          type="number"
-          value={formatDisplayValue(value)}
+          type="text"
+          value={inputValue}
           onChange={handleInputChange}
           disabled={disabled}
           className={`h-7 w-full text-[10px] ${className}`}
@@ -197,7 +175,7 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
   isFirst = false,
   isLast = false,
 }) => {
-  const filterStore = useFilterStore();
+  const { store: filterStore } = useFilterAST();
   const { filterDefinitions: filterDefs, isLoading } = useFilterUIDefinitions();
 
   // Handle changing a field in a condition
@@ -223,11 +201,20 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
     // Create updated condition with new field and default operator
     const updated: ConditionExpression = {
       ...condition,
-      field: {
-        column: fieldId as any, // Use 'any' to bypass type checking temporarily
-        subtype: filterDef.subType,
-        table: filterDef.table,
-      },
+      field:
+        filterDef.subType === "property"
+          ? {
+              column: "properties" as any,
+              subtype: "property",
+              valueMode: "value",
+              key: fieldId,
+              table: filterDef.table,
+            }
+          : {
+              column: fieldId as any,
+              subtype: filterDef.subType,
+              table: filterDef.table,
+            },
       operator: defaultOperator,
       value: defaultValue, // Reset value since field changed
     };
@@ -262,7 +249,12 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
   };
 
   // Find the filter definition for this field
-  const filterDef = filterDefs.find((def) => def.id === condition.field.column);
+  // For property fields, the property name is stored in `key`, not `column`
+  const filterDef = filterDefs.find((def) =>
+    condition.field.subtype === "property" && condition.field.key
+      ? def.id === condition.field.key
+      : def.id === condition.field.column
+  );
 
   // Get available operators
   const operators = filterDef?.operators || [];
@@ -324,7 +316,7 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
       <div className="flex items-center justify-between border border-amber-300 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950">
         <div className="flex flex-col">
           <span className="text-xs font-medium text-amber-800 dark:text-amber-300">
-            Invalid field: &quot;{condition.field.column || "empty"}&quot;
+            Invalid field: &quot;{condition.field.key || condition.field.column || "empty"}&quot;
           </span>
           <span className="text-[10px] text-amber-600 dark:text-amber-400">
             Please select a valid field or remove
@@ -332,6 +324,7 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
         </div>
 
         <Button
+          type="button"
           variant="ghost"
           size="icon"
           onClick={handleRemove}
@@ -431,7 +424,7 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
     >
       <SearchableSelect
         options={fieldOptions}
-        value={condition.field.column}
+        value={condition.field.subtype === "property" && condition.field.key ? condition.field.key : condition.field.column}
         onValueChange={handleFieldChange}
         placeholder="Select field"
         searchPlaceholder="Search field..."
@@ -467,6 +460,7 @@ export const FilterConditionNode: React.FC<FilterConditionNodeProps> = ({
       <div className="flex-grow">{renderValueInput()}</div>
 
       <Button
+        type="button"
         variant="ghost"
         size="icon"
         onClick={handleRemove}

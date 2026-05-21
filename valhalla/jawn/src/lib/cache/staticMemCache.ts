@@ -1,9 +1,13 @@
 import { hashAuth } from "../../utils/hash";
 import { redisClient } from "../clients/redisClient";
 import { Result, ok } from "../../packages/common/result";
+import { SecretManager } from "@helicone-package/secrets/SecretManager";
 
 export class CacheItem<T> {
-  constructor(public value: T, public expiry: number) {}
+  constructor(
+    public value: T,
+    public expiry: number,
+  ) {}
 }
 
 export class InMemoryCache {
@@ -48,18 +52,15 @@ export class InMemoryCache {
     return item.value;
   }
 
-  // Removes a key from the cache if it's expired
-  private removeIfExpired(key: string): void {
-    const item = this.cache.get(key);
-    if (item && item.expiry < Date.now()) {
-      this.cache.delete(key);
-    }
+  // Removes a value from the cache
+  delete(key: string): void {
+    this.cache.delete(key);
   }
 }
 
 class ProviderKeyCache extends InMemoryCache {
   private static instance: ProviderKeyCache;
-  private API_KEY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
   constructor() {
     super(1_000);
   }
@@ -70,21 +71,39 @@ class ProviderKeyCache extends InMemoryCache {
     }
     return ProviderKeyCache.instance;
   }
+  // 5 minutes
+  set<T>(key: string, value: T, ttl: number = 300_000): void {
+    super.set(key, value, ttl);
+  }
 
-  set<T>(key: string, value: T): void {
-    super.set(key, value, this.API_KEY_CACHE_TTL);
+  delete(key: string): void {
+    super.delete(key);
   }
 }
 
-export async function storeInCache(key: string, value: string): Promise<void> {
+export async function storeInCache(
+  key: string,
+  value: string,
+  ttlSeconds: number = 600,
+): Promise<void> {
   const encrypted = await encrypt(value);
   const hashedKey = await hashAuth(key);
-  // redis
-  await redisClient?.set(hashedKey, JSON.stringify(encrypted), "EX", 600);
+  try {
+    // redis
+    await redisClient?.set(
+      hashedKey,
+      JSON.stringify(encrypted),
+      "EX",
+      ttlSeconds,
+    );
+  } catch (e) {
+    console.error("Error storing in cache", e);
+  }
 
   ProviderKeyCache.getInstance().set<string>(
     hashedKey,
-    JSON.stringify(encrypted)
+    JSON.stringify(encrypted),
+    ttlSeconds * 1000,
   );
 }
 
@@ -95,17 +114,22 @@ export async function getFromCache(key: string): Promise<string | null> {
     return decrypt(JSON.parse(encryptedMemory));
   }
 
-  const encryptedRemote = await redisClient?.get(hashedKey);
-  if (!encryptedRemote) {
+  try {
+    const encryptedRemote = await redisClient?.get(hashedKey);
+    if (!encryptedRemote) {
+      return null;
+    }
+    return decrypt(JSON.parse(encryptedRemote));
+  } catch (e) {
+    console.error("Error decrypting cached result", e);
     return null;
   }
-
-  return decrypt(JSON.parse(encryptedRemote));
 }
 
 export async function getAndStoreInCache<T, K>(
   key: string,
-  fn: () => Promise<Result<T, K>>
+  fn: () => Promise<Result<T, K>>,
+  ttl: number = 600,
 ): Promise<Result<T, K>> {
   const cached = await getFromCache(key);
   if (cached !== null) {
@@ -126,17 +150,18 @@ export async function getAndStoreInCache<T, K>(
   if (typeof value.data === "string") {
     await storeInCache(
       key,
-      JSON.stringify({ _helicone_cached_string: value.data })
+      JSON.stringify({ _helicone_cached_string: value.data }),
+      ttl,
     );
     return value;
   } else {
-    await storeInCache(key, JSON.stringify(value.data));
+    await storeInCache(key, JSON.stringify(value.data), ttl);
   }
   return value;
 }
 
 export async function encrypt(
-  text: string
+  text: string,
 ): Promise<{ iv: string; content: string }> {
   const key = getCacheKey();
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -148,7 +173,7 @@ export async function encrypt(
       iv: iv,
     },
     await key,
-    encoded
+    encoded,
   );
 
   return {
@@ -171,7 +196,7 @@ export async function decrypt(encrypted: {
       iv: new Uint8Array(iv),
     },
     await key,
-    new Uint8Array(encryptedContent)
+    new Uint8Array(encryptedContent),
   );
 
   return new TextDecoder().decode(decryptedContent);
@@ -179,11 +204,12 @@ export async function decrypt(encrypted: {
 
 async function getCacheKey(): Promise<CryptoKey> {
   // Convert the hexadecimal key to a byte array
-  if (!process.env.REQUEST_CACHE_KEY) {
+  const requestCacheKey = SecretManager.getSecret("REQUEST_CACHE_KEY");
+  if (!requestCacheKey) {
     throw new Error("REQUEST_CACHE_KEY is not set");
   }
 
-  const keyBytes = Buffer.from(process.env.REQUEST_CACHE_KEY, "hex");
+  const keyBytes = Buffer.from(requestCacheKey, "hex");
 
   try {
     const cryptoKey = await crypto.subtle.importKey(
@@ -191,7 +217,7 @@ async function getCacheKey(): Promise<CryptoKey> {
       keyBytes,
       { name: "AES-GCM" },
       false,
-      ["encrypt", "decrypt"]
+      ["encrypt", "decrypt"],
     );
     return cryptoKey;
   } catch (error) {

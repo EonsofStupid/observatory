@@ -1,26 +1,14 @@
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+// vitest.config.ts (root)
+import { defineConfig } from "vitest/config";
 
-export default defineWorkersConfig({
+export default defineConfig({
   test: {
-    poolOptions: {
-      workers: {
-        wrangler: { configPath: "./wrangler.toml" },
-        miniflare: {
-          compatibilityDate: "2024-01-01",
-          compatibilityFlags: ["nodejs_compat"],
-          bindings: {
-            // Force WORKER_TYPE for testing AI Gateway
-            WORKER_TYPE: "AI_GATEWAY_API",
-          },
-        },
-      },
-    },
-    setupFiles: ["./test/setup.ts"],
-  },
-  resolve: {
-    alias: {
-      "@helicone-package/cost": new URL("../packages/cost", import.meta.url)
-        .pathname,
-    },
+    projects: [
+      "./test/ai-gateway/vitest.config.mts",
+      "./test/cache/vitest.config.mts",
+      "./test/alerts/vitest.config.mts",
+      "./test/token-limit-exception/vitest.config.mts",
+      "./test/rate-limit/vitest.config.mts",
+    ],
   },
 });

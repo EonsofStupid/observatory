@@ -1,19 +1,16 @@
-import { toOpenAI } from "../../providers/anthropic/response/toOpenai";
-import { AntResponseBody } from "../../providers/anthropic/response/types";
-import { toAnthropic } from "../../providers/openai/request/toAnthropic";
-import { OpenAIRequestBody } from "../../providers/openai/request/types";
+import { toOpenAI } from "@helicone-package/llm-mapper/transform/providers/anthropic/response/toOpenai";
+import { AnthropicResponseBody } from "@helicone-package/llm-mapper/transform/types/anthropic";
+import { toAnthropic } from "@helicone-package/llm-mapper/transform/providers/openai/request/toAnthropic";
+import { HeliconeChatCreateParams } from "@helicone-package/prompts/types";
 
-export async function oai2ant({
+export async function ant2oai({
   body,
   headers,
 }: {
-  body: OpenAIRequestBody;
+  body: HeliconeChatCreateParams;
   headers: Headers;
 }): Promise<Response> {
-  console.log(body);
-
   const anthropicBody = toAnthropic(body);
-  console.log(anthropicBody);
 
   let auth = headers.get("Authorization");
 
@@ -25,7 +22,6 @@ export async function oai2ant({
   if (!anthropicVersion) {
     anthropicVersion = "2023-06-01";
   }
-  console.log(anthropicBody);
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -38,21 +34,34 @@ export async function oai2ant({
     },
   });
 
-  const responseBody = await response.json<AntResponseBody>();
-  console.log(responseBody);
   try {
-    return new Response(JSON.stringify(toOpenAI(responseBody)), {
-      headers: {
-        ...response.headers,
-        "Content-Type": "application/json",
-      },
-    });
+    return await ant2oaiResponse(response);
   } catch (e) {
+    const responseBody = await response.json<AnthropicResponseBody>();
     return new Response(JSON.stringify(responseBody), {
       headers: {
         ...response.headers,
         "Content-Type": "application/json",
       },
     });
+  }
+}
+
+export async function ant2oaiResponse(response: Response): Promise<Response> {
+  try {
+    const anthropicBody = await response.json<AnthropicResponseBody>();
+    const openAIBody = toOpenAI(anthropicBody);
+
+    return new Response(JSON.stringify(openAIBody), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: {
+        "content-type": "application/json",
+        ...Object.fromEntries(response.headers.entries()),
+      },
+    });
+  } catch (error) {
+    console.error("Failed to transform Anthropic response:", error);
+    return response;
   }
 }

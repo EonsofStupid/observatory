@@ -20,7 +20,6 @@ export default {
         "2xl": "1400px",
       },
     },
-    fontFamily: {},
     transparent: "transparent",
     current: "currentColor",
     extend: {
@@ -99,6 +98,10 @@ export default {
         muted: {
           DEFAULT: "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",
+        },
+        subdued: {
+          DEFAULT: "hsl(var(--subdued))",
+          foreground: "hsl(var(--subdued-foreground))",
         },
         // Accent Colors
         accent: {
@@ -280,9 +283,6 @@ export default {
   ],
   plugins: [
     require("tailwind-scrollbar"),
-    require("@assistant-ui/react/tailwindcss")({
-      components: ["default-theme"],
-    }),
     require("tailwindcss-animate"),
     require("@tailwindcss/typography"),
     plugin(function ({ addVariant }) {

@@ -13,6 +13,8 @@ import { MAPPERS } from "@helicone-package/llm-mapper/utils/getMappedContent";
 import { getMapperType } from "@helicone-package/llm-mapper/utils/getMapperType";
 import { RateLimitOptions } from "../clients/DurableObjectRateLimiterClient";
 import { RateLimitOptionsBuilder } from "../util/rateLimitOptions";
+import { EscrowInfo } from "../ai-gateway/types";
+import { ValidRequestBody } from "../../RequestBodyBuffer/IRequestBodyBuffer";
 
 export type RetryOptions = {
   retries: number; // number of times to retry the request
@@ -33,8 +35,8 @@ export interface HeliconeProxyRequest {
   retryOptions: IHeliconeHeaders["retryHeaders"];
   omitOptions: IHeliconeHeaders["omitHeaders"];
 
-  requestJson: { stream?: boolean; user?: string } | Record<string, never>;
-  bodyText: string | null;
+  body: ValidRequestBody;
+  unsafeGetBodyText: () => Promise<string | null>;
 
   heliconeErrors: string[];
   providerAuthHash?: string;
@@ -53,6 +55,8 @@ export interface HeliconeProxyRequest {
   threat?: boolean;
   flaggedForModeration?: boolean;
   cf?: CfProperties;
+  escrowInfo?: EscrowInfo;
+  env: Env;
 }
 
 const providerBaseUrlMappings: Record<
@@ -72,7 +76,8 @@ export class HeliconeProxyRequestMapper {
   constructor(
     private request: RequestWrapper,
     private provider: Provider,
-    private env: Env
+    private env: Env,
+    private escrowInfo?: EscrowInfo
   ) {
     this.tokenCalcUrl = env.VALHALLA_URL;
   }
@@ -80,13 +85,16 @@ export class HeliconeProxyRequestMapper {
   private async getHeliconeTemplate() {
     if (this.request.heliconeHeaders.promptHeaders.promptId) {
       try {
-        const rawJson = JSON.parse(await this.request.getRawText());
+        const rawJson = JSON.parse(
+          await this.request.requestBodyBuffer.unsafeGetRawText()
+        );
 
         // Get the mapper type based on the request
         const mapperType = getMapperType({
           model: rawJson.model,
           provider: this.provider,
           path: this.request.url.pathname,
+          requestReferrer: this.request.requestReferrer,
         });
 
         // Map the request using the appropriate mapper
@@ -135,13 +143,33 @@ export class HeliconeProxyRequestMapper {
 
     const targetUrl = buildTargetUrl(this.request.url, api_base);
 
-    const requestJson = await this.requestJson();
-    let isStream = requestJson.stream === true;
+    let isStream = await this.request.requestBodyBuffer.isStream();
 
     if (this.provider === "GOOGLE") {
       const queryParams = new URLSearchParams(targetUrl.search);
       // alt = sse is how Gemini determines if a request is a stream
       isStream = isStream || queryParams.get("alt") === "sse";
+    }
+
+    if (this.provider === "AWS" || this.provider === "BEDROCK") {
+      isStream =
+        isStream || targetUrl.pathname.includes("invoke-with-response-stream");
+    }
+
+    let body: ValidRequestBody;
+    try {
+      body = await this.request.safelyGetBody();
+    } catch (e) {
+      body = await this.request.unsafeGetBodyText();
+    }
+
+    // Apply token limit exception handler
+    await this.request.applyTokenLimitExceptionHandler(this.provider);
+    // Re-fetch body after potential modification
+    try {
+      body = await this.request.safelyGetBody();
+    } catch (e) {
+      body = await this.request.unsafeGetBodyText();
     }
 
     return {
@@ -151,7 +179,6 @@ export class HeliconeProxyRequestMapper {
         isRateLimitedKey:
           this.request.heliconeHeaders.heliconeAuthV2?.keyType ===
           "rate-limited",
-        requestJson: requestJson,
         retryOptions: this.request.heliconeHeaders.retryHeaders,
         provider: this.provider,
         tokenCalcUrl: this.tokenCalcUrl,
@@ -163,7 +190,9 @@ export class HeliconeProxyRequestMapper {
         heliconeErrors: this.heliconeErrors,
         api_base,
         isStream: isStream,
-        bodyText: await this.getBody(),
+        body: body,
+        unsafeGetBodyText: this.request.unsafeGetBodyText.bind(this.request),
+
         startTime,
         url: this.request.url,
         requestId:
@@ -172,27 +201,11 @@ export class HeliconeProxyRequestMapper {
         nodeId: this.request.heliconeHeaders.nodeId ?? null,
         targetUrl,
         cf: this.request.cf ?? undefined,
+        escrowInfo: this.escrowInfo,
+        env: this.env,
       },
       error: null,
     };
-  }
-
-  private async getBody(): Promise<string | null> {
-    if (this.request.getMethod() === "GET") {
-      return null;
-    }
-
-    if (this.request.heliconeHeaders.featureFlags.streamUsage) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const jsonBody = (await this.request.getJson()) as any;
-      if (!jsonBody["stream_options"]) {
-        jsonBody["stream_options"] = {};
-      }
-      jsonBody["stream_options"]["include_usage"] = true;
-      return JSON.stringify(jsonBody);
-    }
-
-    return await this.request.getText();
   }
 
   private validateApiConfiguration(api_base: string | undefined): boolean {
@@ -248,11 +261,5 @@ export class HeliconeProxyRequestMapper {
       this.heliconeErrors.push(rateLimitOptions.error);
     }
     return rateLimitOptions.data ?? null;
-  }
-
-  async requestJson(): Promise<HeliconeProxyRequest["requestJson"]> {
-    return this.request.getMethod() === "POST"
-      ? await this.request.getJson()
-      : {};
   }
 }

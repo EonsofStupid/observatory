@@ -17,6 +17,7 @@ import { ResponseBodyHandler } from "../lib/handlers/ResponseBodyHandler";
 import { S3ReaderHandler } from "../lib/handlers/S3ReaderHandler";
 import { SegmentLogHandler } from "../lib/handlers/SegmentLogHandler";
 import { StripeLogHandler } from "../lib/handlers/StripeLogHandler";
+import { StripeIntegrationHandler } from "../lib/handlers/StripeIntegrationHandler";
 import { WebhookHandler } from "../lib/handlers/WebhookHandler";
 import { KAFKA_ENABLED } from "../lib/producers/KafkaProducerImpl";
 import { S3Client } from "../lib/shared/db/s3Client";
@@ -24,12 +25,35 @@ import { LogStore } from "../lib/stores/LogStore";
 import { RateLimitStore } from "../lib/stores/RateLimitStore";
 import { VersionedRequestStore } from "../lib/stores/request/VersionedRequestStore";
 import { WebhookStore } from "../lib/stores/WebhookStore";
+import {
+  err,
+  ok,
+  PromiseGenericResult,
+  Result,
+} from "../packages/common/result";
+import { SecretManager } from "@helicone-package/secrets/SecretManager";
 
 export interface LogMetaData {
   batchId?: string;
   partition?: number;
   lastOffset?: string;
   messageCount?: number;
+}
+
+async function withTimeout<T>(
+  fn: PromiseGenericResult<T>,
+  timeout: number
+): Promise<PromiseGenericResult<T>> {
+  try {
+    return await Promise.race([
+      fn,
+      new Promise<Result<T, string>>((_, reject) =>
+        setTimeout(() => reject(err("Timeout")), timeout)
+      ),
+    ]);
+  } catch (error) {
+    return err("Timeout");
+  }
 }
 
 export class LogManager {
@@ -49,8 +73,8 @@ export class LogManager {
     logMetaData: LogMetaData
   ): Promise<void> {
     const s3Client = new S3Client(
-      process.env.S3_ACCESS_KEY ?? "",
-      process.env.S3_SECRET_KEY ?? "",
+      process.env.S3_ACCESS_KEY || undefined,
+      process.env.S3_SECRET_KEY || undefined,
       process.env.S3_ENDPOINT ?? "",
       process.env.S3_BUCKET_NAME ?? "",
       (process.env.S3_REGION as "us-west-2" | "eu-west-1") ?? "us-west-2"
@@ -75,6 +99,7 @@ export class LogManager {
     const webhookHandler = new WebhookHandler(new WebhookStore());
     const segmentHandler = new SegmentLogHandler();
     const stripeLogHandler = new StripeLogHandler();
+    const stripeIntegrationHandler = new StripeIntegrationHandler();
 
     authHandler
       .setNext(rateLimitHandler)
@@ -83,6 +108,8 @@ export class LogManager {
       .setNext(responseBodyHandler)
       .setNext(promptHandler)
       .setNext(onlineEvalHandler)
+      // note this needs to be before the logging handler since it is mutating the properties
+      .setNext(stripeIntegrationHandler)
       .setNext(loggingHandler)
       .setNext(posthogHandler)
       .setNext(lytixHandler)
@@ -90,10 +117,28 @@ export class LogManager {
       .setNext(segmentHandler)
       .setNext(stripeLogHandler);
 
+    const globalTimingMetrics: Map<string, number> = new Map();
+
     await Promise.all(
       logMessages.map(async (logMessage) => {
         const handlerContext = new HandlerContext(logMessage);
-        const result = await authHandler.handle(handlerContext);
+        const result = await withTimeout(
+          authHandler.handle(handlerContext),
+          60_000 * 15 // 15 minutes
+        );
+        const end = performance.now();
+
+        for (let i = 0; i < handlerContext.timingMetrics.length; i++) {
+          const metric = handlerContext.timingMetrics[i];
+          const nextEndTime =
+            i === handlerContext.timingMetrics.length - 1
+              ? end
+              : handlerContext.timingMetrics[i + 1]?.start;
+
+          const totalTime = nextEndTime - metric.start;
+          const currentTime = globalTimingMetrics.get(metric.constructor) ?? 0;
+          globalTimingMetrics.set(metric.constructor, currentTime + totalTime);
+        }
 
         if (result.error) {
           Sentry.captureException(new Error(result.error), {
@@ -125,7 +170,10 @@ export class LogManager {
               `Reproducing error for request ${logMessage.log.request.id} for batch ${logMetaData.batchId}: ${result.error}`
             );
           }
-          if (KAFKA_ENABLED) {
+
+          const pushToDLQ: boolean =
+            (process.env.SQS_ENABLED ?? "false") === "true" || KAFKA_ENABLED;
+          if (pushToDLQ) {
             const kafkaProducer = new HeliconeQueueProducer();
 
             const res = await kafkaProducer.sendMessages(
@@ -159,23 +207,33 @@ export class LogManager {
       })
     );
 
+    for (const [constructor, averageTime] of globalTimingMetrics) {
+      Promise.resolve(
+        dataDogClient.logDistributionMetric(
+          Date.now(),
+          averageTime,
+          constructor
+        )
+      ).catch();
+    }
+
     await this.logRateLimits(rateLimitHandler, logMetaData);
     await this.logHandlerResults(loggingHandler, logMetaData, logMessages);
     await this.logStripeMeter(stripeLogHandler, logMetaData);
+    await this.logStripeIntegration(stripeIntegrationHandler, logMetaData);
 
     // BEST EFFORT LOGGING
     this.logPosthogEvents(posthogHandler, logMetaData);
     this.logLytixEvents(lytixHandler, logMetaData);
     this.logSegmentEvents(segmentHandler, logMetaData);
     this.logWebhooks(webhookHandler, logMetaData);
-    console.log(`Finished processing batch ${logMetaData.batchId}`);
   }
 
   private async logStripeMeter(
     stripeLogHandler: StripeLogHandler,
     logMetaData: LogMetaData
   ): Promise<void> {
-    if (!process.env.STRIPE_SECRET_KEY) {
+    if (!SecretManager.getSecret("STRIPE_SECRET_KEY")) {
       return;
     }
     const start = performance.now();
@@ -192,12 +250,29 @@ export class LogManager {
     });
   }
 
+  private async logStripeIntegration(
+    stripeIntegrationHandler: StripeIntegrationHandler,
+    logMetaData: LogMetaData
+  ): Promise<void> {
+    const start = performance.now();
+    await stripeIntegrationHandler.handleResults();
+    const end = performance.now();
+    const executionTimeMs = end - start;
+
+    dataDogClient.logHandleResults({
+      executionTimeMs,
+      handlerName: stripeIntegrationHandler.constructor.name,
+      methodName: "handleResults",
+      messageCount: logMetaData.messageCount ?? 0,
+      message: "Stripe integration",
+    });
+  }
+
   private async logHandlerResults(
     handler: LoggingHandler,
     logMetaData: LogMetaData,
     logMessages: KafkaMessageContents[]
   ): Promise<void> {
-    console.log(`Upserting logs for batch ${logMetaData.batchId}`);
     const start = performance.now();
     const result = await handler.handleResults();
     const end = performance.now();
@@ -226,11 +301,15 @@ export class LogManager {
       });
 
       console.error(
-        `Error inserting logs: ${JSON.stringify(result.error)} for batch ${logMetaData.batchId
+        `Error inserting logs: ${JSON.stringify(result.error)} for batch ${
+          logMetaData.batchId
         }`
       );
 
-      if (KAFKA_ENABLED) {
+      const pushToDLQ: boolean =
+        (process.env.SQS_ENABLED ?? "false") === "true" || KAFKA_ENABLED;
+
+      if (pushToDLQ) {
         const kafkaProducer = new HeliconeQueueProducer();
         const kafkaResult = await kafkaProducer.sendMessages(
           logMessages,
@@ -259,7 +338,6 @@ export class LogManager {
     handler: RateLimitHandler,
     logMetaData: LogMetaData
   ): Promise<void> {
-    console.log(`Inserting rate limits for batch ${logMetaData.batchId}`);
     const start = performance.now();
     const { data: rateLimitInsId, error: rateLimitErr } =
       await handler.handleResults();

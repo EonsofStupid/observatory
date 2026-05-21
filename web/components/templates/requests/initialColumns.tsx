@@ -15,6 +15,7 @@ import {
 import CostPill from "./costPill";
 import { COUTNRY_CODE_DIRECTORY } from "./countryCodeDirectory";
 import ModelPill from "./modelPill";
+import ProviderPill from "./providerPill";
 import StatusBadge from "./statusBadge";
 import { DEFAULT_UUID } from "@helicone-package/llm-mapper/types";
 
@@ -87,6 +88,16 @@ export const getInitialColumns = (): ColumnDef<MappedLLMRequest>[] => [
     size: 100,
   },
   {
+    id: "provider",
+    accessorKey: "provider",
+    header: "Provider",
+    cell: (info) => {
+      return (
+        <ProviderPill provider={info.row.original.heliconeMetadata.provider} />
+      );
+    },
+  },
+  {
     id: "requestText",
     accessorKey: "requestText",
     header: "Request",
@@ -94,6 +105,7 @@ export const getInitialColumns = (): ColumnDef<MappedLLMRequest>[] => [
     meta: {
       sortKey: "request_prompt",
     },
+    minSize: 400,
   },
   {
     id: "responseText",
@@ -103,6 +115,7 @@ export const getInitialColumns = (): ColumnDef<MappedLLMRequest>[] => [
     meta: {
       sortKey: "response_text",
     },
+    minSize: 400,
   },
   {
     id: "model",
@@ -159,6 +172,21 @@ export const getInitialColumns = (): ColumnDef<MappedLLMRequest>[] => [
     size: 175,
   },
   {
+    id: "reasoningTokens",
+    accessorKey: "reasoningTokens",
+    header: "Reasoning Tokens",
+    cell: (info) => {
+      const tokens = Number(
+        info.row.original.heliconeMetadata.reasoningTokens,
+      );
+      return <span>{tokens >= 0 ? tokens : "not found"}</span>;
+    },
+    meta: {
+      sortKey: "reasoning_tokens",
+    },
+    size: 175,
+  },
+  {
     id: "latency",
     accessorKey: "latency",
     header: "Latency",
@@ -196,7 +224,7 @@ export const getInitialColumns = (): ColumnDef<MappedLLMRequest>[] => [
       );
     },
     meta: {
-      sortKey: "tfft",
+      sortKey: "time_to_first_token",
     },
   },
   {

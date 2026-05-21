@@ -10,7 +10,8 @@ export type AllOperators =
   | "contains"
   | "not-contains"
   | "gin-contains"
-  | "vector-contains";
+  | "vector-contains"
+  | "has";
 
 export type TextOperators = Record<
   "not-equals" | "equals" | "like" | "ilike" | "contains" | "not-contains",
@@ -181,6 +182,8 @@ export type FilterLeafRequestResponseLog =
 interface RequestResponseRMTToOperators {
   country_code: SingleKey<TextOperators>;
   latency: SingleKey<NumberOperators>;
+  cost: SingleKey<NumberOperators>;
+  provider: SingleKey<TextOperators>;
   time_to_first_token: SingleKey<NumberOperators>;
   status: SingleKey<NumberOperators>;
   request_created_at: SingleKey<TimestampOperatorsTyped>;
@@ -198,6 +201,9 @@ interface RequestResponseRMTToOperators {
   prompt_cache_write_tokens: SingleKey<NumberOperators>;
   total_tokens: SingleKey<NumberOperators>;
   target_url: SingleKey<TextOperators>;
+  property_key: {
+    equals: string;
+  };
   properties: {
     [key: string]: SingleKey<TextOperators>;
   };
@@ -208,8 +214,8 @@ interface RequestResponseRMTToOperators {
     [key: string]: SingleKey<TextOperators>;
   };
   scores_column: SingleKey<TextOperators>;
-  request_body: SingleKey<VectorOperators>;
-  response_body: SingleKey<VectorOperators>;
+  request_body: SingleKey<TextOperators>;
+  response_body: SingleKey<TextOperators>;
   cache_enabled: SingleKey<BooleanOperators>;
   cache_reference_id: SingleKey<TextOperators>;
   cached: SingleKey<BooleanOperators>;
@@ -217,6 +223,8 @@ interface RequestResponseRMTToOperators {
   "helicone-score-feedback": SingleKey<BooleanOperators>; // TODO: make this not a string literal key
   prompt_id: SingleKey<TextOperators>;
   prompt_version: SingleKey<TextOperators>;
+  request_referrer: SingleKey<TextOperators>;
+  is_passthrough_billing: SingleKey<BooleanOperators>;
 }
 export type FilterLeafRequestResponseRMT =
   SingleKey<RequestResponseRMTToOperators>;
@@ -383,7 +391,8 @@ export type TablesAndViews = {
 };
 export type FilterLeaf = SingleKey<TablesAndViews>;
 
-export type FilterNode = FilterLeaf | FilterBranch | "all";
+// "all" is used by frontend to represent "match everything" - it's handled in buildFilter
+export type FilterNode = FilterLeaf | FilterBranch | "all" | {};
 
 export interface FilterBranch {
   left: FilterNode;

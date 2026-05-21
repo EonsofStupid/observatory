@@ -1,7 +1,8 @@
 import { Cloudflare } from "cloudflare";
+import { SecretManager } from "@helicone-package/secrets/SecretManager";
 
 const cloudflare = new Cloudflare({
-  apiToken: process.env.CLOUDFLARE_API_TOKEN,
+  apiToken: SecretManager.getSecret("CLOUDFLARE_API_TOKEN"),
 });
 
 const hashWithHmac = async (key: string, hmac_key: 1 | 2) => {
@@ -85,7 +86,7 @@ export async function hash(key: string): Promise<string> {
 }
 
 async function getCacheKey(): Promise<CryptoKey> {
-  const requestCacheKey = process.env.REQUEST_CACHE_KEY;
+  const requestCacheKey = SecretManager.getSecret("REQUEST_CACHE_KEY");
   if (!requestCacheKey) {
     throw new Error("REQUEST_CACHE_KEY is not set");
   }
@@ -128,6 +129,37 @@ export async function removeFromCache(key: string): Promise<void> {
     {
       account_id: process.env.CLOUDFLARE_ACCOUNT_ID ?? "",
     }
+  );
+}
+
+export async function removeSecureCacheEntries(
+  keys: string[]
+): Promise<void> {
+  const namespaceId = process.env.CLOUDFLARE_KV_NAMESPACE_ID ?? "";
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
+
+  // since on worker, we have secure cache (both HMAC key1 and HMAC key2)
+  await Promise.all(
+    keys
+      .filter((key) => Boolean(key))
+      .map(async (key) => {
+        const hashedKeys = await Promise.all([
+          hashWithHmac(key, 1),
+          hashWithHmac(key, 2),
+        ]);
+
+        await Promise.all(
+          hashedKeys.map((hashedKey) =>
+            cloudflare.kv.namespaces.values.delete(
+              namespaceId,
+              hashedKey,
+              {
+                account_id: accountId,
+              }
+            )
+          )
+        );
+      })
   );
 }
 

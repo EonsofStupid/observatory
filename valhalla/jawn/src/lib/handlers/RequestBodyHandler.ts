@@ -1,37 +1,20 @@
-import { tryParse } from "../../utils/helpers";
-import {
-  getModelFromRequest,
-  isRequestImageModel,
-} from "../../utils/modelMapper";
-import { ImageModelParsingResponse } from "../shared/imageParsers/core/parsingResponse";
-import { getRequestImageModelParser } from "../shared/imageParsers/parserMapper";
 import { PromiseGenericResult, err } from "../../packages/common/result";
+import { tryParse } from "../../utils/helpers";
+import { getModelFromRequest } from "../../utils/modelMapper";
 import { AbstractLogHandler } from "./AbstractLogHandler";
 import { HandlerContext } from "./HandlerContext";
 
-export const MAX_ASSETS = 100;
-
-function truncMap(
-  map: Map<string, string>,
-  maxSize: number
-): Map<string, string> {
-  return new Map(Array.from(map.entries()).slice(0, maxSize));
-}
-
 export class RequestBodyHandler extends AbstractLogHandler {
   async handle(context: HandlerContext): PromiseGenericResult<string> {
+    const start = performance.now();
+    context.timingMetrics.push({
+      constructor: this.constructor.name,
+      start,
+    });
     try {
-      const { body: processedBody, model: requestModel } =
+      const { body: requestBodyFinal, model: requestModel } =
         this.processRequestBody(context);
 
-      const { body: requestBodyFinal, assets: requestBodyAssets } =
-        this.processRequestBodyImages(
-          context.message.log.request.id,
-          processedBody,
-          requestModel
-        );
-
-      context.processedLog.request.assets = requestBodyAssets;
       context.processedLog.request.body = requestBodyFinal;
       context.processedLog.request.model = requestModel;
 
@@ -46,15 +29,20 @@ export class RequestBodyHandler extends AbstractLogHandler {
         context.processedLog.request.model = "vector_db";
       } else if (this.isToolRequest(requestBodyFinal)) {
         context.processedLog.request.model = `tool:${requestBodyFinal.toolName}`;
+      } else if (this.isDataRequest(requestBodyFinal)) {
+        context.processedLog.request.model = `data:${requestBodyFinal.name}`;
       }
 
       try {
         context.processedLog.request.properties = Object.entries(
           context.message.log.request.properties
-        ).reduce((acc, [key, value]) => {
-          acc[key] = this.cleanRequestBody(value);
-          return acc;
-        }, {} as Record<string, string>);
+        ).reduce(
+          (acc, [key, value]) => {
+            acc[key] = this.cleanRequestBody(value);
+            return acc;
+          },
+          {} as Record<string, string>
+        );
       } catch (error: any) {
         context.processedLog.request.properties =
           context.message.log.request.properties;
@@ -82,13 +70,26 @@ export class RequestBodyHandler extends AbstractLogHandler {
   }
 
   private isVectorDBRequest(requestBody: any): boolean {
+    if (typeof requestBody !== "object" || requestBody === null) {
+      return false;
+    }
     return (
       requestBody.hasOwnProperty("_type") && requestBody._type === "vector_db"
     );
   }
 
   private isToolRequest(requestBody: any): boolean {
+    if (typeof requestBody !== "object" || requestBody === null) {
+      return false;
+    }
     return requestBody.hasOwnProperty("_type") && requestBody._type === "tool";
+  }
+
+  private isDataRequest(requestBody: any): boolean {
+    if (typeof requestBody !== "object" || requestBody === null) {
+      return false;
+    }
+    return requestBody.hasOwnProperty("_type") && requestBody._type === "data";
   }
 
   processRequestBody(context: HandlerContext): {
@@ -128,33 +129,6 @@ export class RequestBodyHandler extends AbstractLogHandler {
       body: parsedRequestBody,
       model: requestModel,
     };
-  }
-
-  private processRequestBodyImages(
-    requestId: string,
-    requestBody: any,
-    model?: string
-  ): ImageModelParsingResponse {
-    let imageModelParsingResponse: ImageModelParsingResponse = {
-      body: requestBody,
-      assets: new Map<string, string>(),
-    };
-    if (model && isRequestImageModel(model)) {
-      const imageModelParser = getRequestImageModelParser(model, requestId);
-      if (imageModelParser) {
-        imageModelParsingResponse =
-          imageModelParser.processRequestBody(requestBody);
-      }
-    }
-
-    if (imageModelParsingResponse.assets.size > MAX_ASSETS) {
-      imageModelParsingResponse.assets = truncMap(
-        imageModelParsingResponse.assets,
-        MAX_ASSETS
-      );
-    }
-
-    return imageModelParsingResponse;
   }
 
   cleanRequestBody(requestBodyStr: string): string {

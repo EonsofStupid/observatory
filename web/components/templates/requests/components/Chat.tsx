@@ -20,7 +20,7 @@ import {
 } from "@dnd-kit/sortable";
 import { GripVertical } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
-
+import ToolsRenderer from "./ToolsRenderer";
 export type ChatMode = "PLAYGROUND_INPUT" | "PLAYGROUND_OUTPUT" | "DEFAULT";
 
 interface ChatProps {
@@ -38,6 +38,10 @@ export default function Chat({
     Record<number, boolean>
   >({});
 
+  const tools = useMemo(() => {
+    return mappedRequest.schema.request?.tools;
+  }, [mappedRequest, mode]);
+
   const messages = useMemo(() => {
     const requestMessages = mappedRequest.schema.request?.messages ?? [];
     const responseMessages = mappedRequest.schema.response?.messages ?? [];
@@ -49,6 +53,7 @@ export default function Chat({
           : [...requestMessages, ...responseMessages];
 
     // For contentArray messages, flatten. In playground, we treat as one message dynamically.
+    // Also handle reasoning messages by splitting them into separate reasoning + content messages
     return mode === "PLAYGROUND_INPUT"
       ? allMessages
       : allMessages.reduce<Message[]>((acc, message) => {
@@ -66,7 +71,47 @@ export default function Chat({
             );
             return [...acc, ...flattenedParts];
           }
-          // If not a contentArray or it's empty, just add the message itself
+
+          // Handle messages with reasoning content - split into reasoning + content messages
+          if (message.reasoning) {
+            const reasoningMessage: Message = {
+              ...message,
+              role: "reasoning",
+              content: message.reasoning,
+              reasoning: undefined,
+              id: `${message.id || "msg"}-reasoning`,
+              _type: "message",
+            };
+            
+            if (message.content) {
+              const contentMessage: Message = {
+                ...message,
+                reasoning: undefined,
+                id: message.id || `msg-content`,
+              };
+              return [...acc, reasoningMessage, contentMessage];
+            }
+            return [...acc, reasoningMessage];
+          }
+
+          // Handle messages with only reasoning (no content)
+          if (message.reasoning && !message.content) {
+            const reasoningMessage: Message = {
+              ...message,
+              role: "reasoning",
+              content: message.reasoning,
+              reasoning: undefined,
+              id: message.id || `msg-reasoning`,
+              _type: "message",
+            };
+            return [...acc, reasoningMessage];
+          }
+
+          // Keep image messages even if they don't have content
+          if (!message.content && !message.reasoning && message._type !== "image") {
+            return acc;
+          }
+
           return [...acc, message];
         }, []);
   }, [mappedRequest, mode]);
@@ -179,6 +224,9 @@ export default function Chat({
 
   return (
     <div className="flex h-full w-full flex-col">
+      <div className="border-b border-border">
+        <ToolsRenderer tools={tools} chatMode={mode} />
+      </div>
       {renderMessages()}
       {mode === "PLAYGROUND_INPUT" && (
         <div>

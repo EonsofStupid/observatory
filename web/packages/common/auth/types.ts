@@ -50,8 +50,11 @@ export type HeliconeUserResult = PromiseGenericResult<HeliconeUser>;
 export type HeliconeOrg = {
   color: string;
   created_at: string | null;
+  default_time_filter: string | null;
   domain: string | null;
+  free_limit_exceeded?: string | null; // YYYY-MM format or null
   governance_settings: any | null;
+  gateway_discount_enabled: boolean;
   has_onboarded: boolean;
   has_integrated: boolean;
   icon: string;
@@ -76,4 +79,6 @@ export type HeliconeOrg = {
   stripe_subscription_item_id: string | null;
   subscription_status: string | null;
   tier: string | null;
+  allow_negative_balance: boolean;
+  credit_limit: number;
 };

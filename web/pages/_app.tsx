@@ -2,7 +2,7 @@ import { createBrowserSupabaseClient } from "@supabase/auth-helpers-nextjs";
 import { Session, SessionContextProvider } from "@supabase/auth-helpers-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AppProps } from "next/app";
-import { ReactElement, ReactNode, useState } from "react";
+import { ReactElement, ReactNode, useState, useEffect } from "react";
 import Notification from "../components/shared/notification/Notification";
 import { NotificationProvider } from "../components/shared/notification/NotificationContext";
 import "react-grid-layout/css/styles.css";
@@ -19,12 +19,15 @@ import ThemeProvider from "../components/shared/theme/themeContext";
 import Script from "next/script";
 import { PostHogProvider } from "posthog-js/react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { Inter } from "next/font/google";
 import { env } from "next-runtime-env";
 import { FilterProvider } from "@/filterAST/context/filterContext";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
+import { captureAttributionParams } from "@helicone-package/common";
 
-const inter = Inter({ subsets: ["latin"] });
+// Use system font stack for faster builds - Inter is loaded via CSS
+const inter = {
+  className: "font-sans",
+};
 
 declare global {
   interface Window {
@@ -90,11 +93,18 @@ export function SupabaseProvider({
 }
 
 export default function MyApp({ Component, pageProps }: AppPropsWithLayout) {
-  const queryClient = new QueryClient();
+  const [queryClient] = useState(() => new QueryClient());
 
   const getLayout = Component.getLayout ?? ((page) => page);
 
   const trackingEnabled = process.env.NEXT_PUBLIC_TRACKING_ENABLED || false;
+
+  // Capture attribution params (gclid, UTM) on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      captureAttributionParams(window.location.search);
+    }
+  }, []);
 
   return (
     <>

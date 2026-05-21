@@ -1,4 +1,4 @@
-import { ProviderName } from "./providers";
+import { ModelProviderName } from "./providers";
 
 export interface AuthorMetadata {
   modelCount: number;
@@ -15,26 +15,31 @@ export const AUTHORS = [
   "openai",
   "google",
   "meta-llama",
-  "mistralai",
+  "mistral",
   "amazon",
   "microsoft",
   "nvidia",
-  "cohere",
   "deepseek",
   "qwen",
-  "x-ai",
+  "xai",
   "moonshotai",
   "perplexity",
+  "alibaba",
+  "zai",
+  "baidu",
 ] as const;
 
-export type AuthorName = (typeof AUTHORS)[number];
+export type AuthorName = (typeof AUTHORS)[number] | "passthrough";
 
-export type Modality =
-  | "text"
-  | "text->text"
-  | "text+image->text"
-  | "text->image"
-  | "multimodal";
+export type InputModality = "text" | "image" | "audio" | "video";
+export type OutputModality = "text" | "image" | "audio" | "video";
+
+export interface Modality {
+  inputs: InputModality[];
+  outputs: OutputModality[];
+}
+
+export type ResponseFormat = "ANTHROPIC" | "OPENAI" | "GOOGLE";
 
 export type Tokenizer =
   | "Claude"
@@ -44,13 +49,18 @@ export type Tokenizer =
   | "Llama4"
   | "Gemini"
   | "Mistral"
+  | "MoonshotAI"
   | "Qwen"
   | "DeepSeek"
   | "Cohere"
-  | "Grok";
+  | "Grok"
+  | "Tekken"
+  | "Zai"
+  | "Baidu";
 
 export type StandardParameter =
   | "max_tokens"
+  | "max_completion_tokens"
   | "temperature"
   | "top_p"
   | "top_k"
@@ -74,26 +84,71 @@ export type StandardParameter =
   | "logit_bias"
   | "logprobs"
   | "top_logprobs"
-  | "structured_outputs";
+  | "structured_outputs"
+  | "verbosity"
+  | "n";
+
+export const PARAMETER_LABELS: Record<StandardParameter, string> = {
+  max_tokens: "Max Tokens",
+  max_completion_tokens: "Max Completion Tokens",
+  temperature: "Temperature",
+  top_p: "Top-P",
+  top_k: "Top-K",
+  stop: "Stop Sequences",
+  stream: "Streaming",
+  frequency_penalty: "Frequency Penalty",
+  presence_penalty: "Presence Penalty",
+  repetition_penalty: "Repetition Penalty",
+  seed: "Seed",
+  tools: "Function Calling",
+  tool_choice: "Tool Choice",
+  functions: "Functions",
+  function_call: "Function Call",
+  reasoning: "Reasoning",
+  include_reasoning: "Include Reasoning",
+  thinking: "Chain of Thought",
+  response_format: "Response Format",
+  json_mode: "JSON Mode",
+  truncate: "Truncate",
+  min_p: "Min-P",
+  logit_bias: "Logit Bias",
+  logprobs: "Log Probabilities",
+  top_logprobs: "Top Log Probs",
+  structured_outputs: "Structured Outputs",
+  verbosity: "Verbosity",
+  n: "Number of Completions",
+};
+
+/**
+ * Per-modality pricing configuration.
+ * Supports input, cached input (as multiplier), and output rates.
+ */
+export interface ModalityPricing {
+  input?: number; // cost per input token
+  cachedInputMultiplier?: number; // multiplier on input rate (0.1 = 10% of input)
+  output?: number; // cost per output token
+}
 
 export interface ModelPricing {
-  prompt: number;
-  completion: number;
-  image?: number;
-  cacheRead?: number;
-  cacheWrite?:
-    | number
-    | {
-        "5m": number;
-        "1h": number;
-        default: number;
-      };
+  threshold: number;
+  input: number;
+  output: number;
+  cacheMultipliers?: {
+    cachedInput: number;
+    write5m?: number;
+    write1h?: number;
+  };
+  cacheStoragePerHour?: number;
   thinking?: number;
   request?: number;
-  audio?: number;
-  video?: number;
+
+  // Per-modality pricing
+  image?: ModalityPricing;
+  audio?: ModalityPricing;
+  video?: ModalityPricing;
+  file?: ModalityPricing;
+
   web_search?: number;
-  internal_reasoning?: number;
 }
 
 export interface ModelConfig {
@@ -105,56 +160,117 @@ export interface ModelConfig {
   created: string;
   modality: Modality;
   tokenizer: Tokenizer;
+  pinnedVersionOfModel?: string;
 }
 
 interface BaseConfig {
-  pricing: ModelPricing;
+  pricing: ModelPricing[];
   contextLength: number;
   maxCompletionTokens: number;
   ptbEnabled: boolean;
   version?: string;
+  unsupportedParameters?: StandardParameter[];
 }
+
+export interface RateLimits {
+  rpm?: number;
+  tpm?: number;
+  tpd?: number;
+}
+
+// Plugin types
+export type PluginId = "web"; // Add more with | as we support more plugins
+
+interface BasePlugin<T extends PluginId = PluginId> {
+  id: T;
+}
+
+export interface WebSearchPlugin extends BasePlugin<"web"> {
+  max_uses?: number;
+  allowed_domains?: string[];
+  blocked_domains?: string[];
+  user_location?: {
+    type?: "approximate";
+    city?: string;
+    region?: string; // state/region
+    country?: string; // country code
+    timezone?: string; // IANA timezone ID
+  };
+}
+
+export type Plugin = WebSearchPlugin; // Add more with | as we add plugin types
+
+export type BodyMappingType = "OPENAI" | "NO_MAPPING" | "RESPONSES";
 
 export interface ModelProviderConfig extends BaseConfig {
   providerModelId: string;
-  provider: ProviderName;
+  provider: ModelProviderName;
+  author: AuthorName;
   supportedParameters: StandardParameter[];
+  supportedPlugins?: PluginId[];
+  rateLimits?: RateLimits;
   endpointConfigs: Record<string, EndpointConfig>;
   crossRegion?: boolean;
+  priority?: number;
+  quantization?: "fp4" | "fp8" | "fp16" | "bf16" | "int4";
+  responseFormat?: ResponseFormat;
+  requireExplicitRouting?: boolean;
+  providerModelIdAliases?: string[];
 }
 
 export interface EndpointConfig extends UserEndpointConfig {
   providerModelId?: string;
-  pricing?: ModelPricing;
+  pricing?: ModelPricing[];
   contextLength?: number;
   maxCompletionTokens?: number;
   ptbEnabled?: boolean;
   version?: string;
+  rateLimits?: RateLimits;
+  priority?: number;
+}
+
+export interface RequestParams {
+  isStreaming?: boolean;
+  bodyMapping?: BodyMappingType;
+  apiKey?: string;
 }
 
 export interface Endpoint extends BaseConfig {
-  baseUrl: string;
-  provider: ProviderName;
+  modelConfig: ModelProviderConfig;
+  userConfig: UserEndpointConfig;
+  provider: ModelProviderName;
+  author: AuthorName;
   providerModelId: string;
   supportedParameters: StandardParameter[];
+  priority?: number; // Lower number = higher priority
 }
 
 export interface UserEndpointConfig {
   region?: string;
   location?: string;
   projectId?: string;
+  baseUri?: string; // Custom base URL (e.g., Azure OpenAI, OpenAI US data residency)
   deploymentName?: string;
   resourceName?: string;
+  apiVersion?: string; // Azure OpenAI
   crossRegion?: boolean;
-  gatewayMapping?: "OPENAI" | "NO_MAPPING";
+  gatewayMapping?: BodyMappingType;
+  modelName?: string;
+  heliconeModelId?: string; // Azure OpenAI
+}
+
+export interface ModelSpec {
+  modelName: string;
+  provider?: ModelProviderName;
+  customUid?: string;
+  isOnline?: boolean;
 }
 
 export interface AuthContext {
-  endpoint: Endpoint;
-  config: UserEndpointConfig;
   apiKey?: string;
   secretKey?: string;
-  bodyMapping?: "OPENAI" | "NO_MAPPING";
+  orgId?: string;
+  bodyMapping?: BodyMappingType;
   requestMethod?: string;
   requestUrl?: string;
   requestBody?: string;
@@ -166,6 +282,11 @@ export interface AuthResult {
 
 export interface RequestBodyContext {
   parsedBody: any;
-  bodyMapping: "OPENAI" | "NO_MAPPING";
-  toAnthropic: (body: any) => any;
+  bodyMapping: BodyMappingType;
+  toAnthropic: (
+    body: any,
+    providerModelId?: string,
+    options?: { includeCacheBreakpoints?: boolean }
+  ) => any;
+  toChatCompletions: (body: any) => any;
 }

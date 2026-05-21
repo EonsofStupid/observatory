@@ -69,6 +69,31 @@ export class Prompt2025Controller extends Controller {
     return result;
   }
 
+  @Patch("id/{promptId}/tags")
+  public async updatePrompt2025Tags(
+    @Path() promptId: string,
+    @Body() requestBody: {
+      tags: string[];
+    },
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<string[], string>> {
+    const promptManager = new Prompt2025Manager(request.authParams);
+    const result = await promptManager.updatePromptTags({
+      promptId,
+      tags: requestBody.tags ?? [],
+    });
+    if (result.error) {
+      if (result.error === "Prompt not found") {
+        this.setStatus(404);
+      } else {
+        this.setStatus(500);
+      }
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+
   @Delete("{promptId}")
   public async deletePrompt2025(
     @Path() promptId: string,
@@ -217,7 +242,31 @@ export class Prompt2025Controller extends Controller {
     }
     return result;
   }
-  
+
+  @Post("remove/environment")
+  public async removeEnvironmentFromVersion(
+    @Body()
+    requestBody: {
+      promptId: string;
+      promptVersionId: string;
+      environment: string;
+    },
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<null, string>> {
+    const promptManager = new Prompt2025Manager(request.authParams);
+    const result = await promptManager.removeEnvironmentFromVersion({
+      promptId: requestBody.promptId,
+      promptVersionId: requestBody.promptVersionId,
+      environment: requestBody.environment,
+    });
+    if (result.error) {
+      this.setStatus(500);
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+
   @Get("count")
   public async getPrompt2025Count(
     @Request() request: JawnAuthenticatedRequest
@@ -262,7 +311,10 @@ export class Prompt2025Controller extends Controller {
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<Prompt2025Version, string>> {
     const promptManager = new Prompt2025Manager(request.authParams);
-    const result = await promptManager.getPromptVersionWithBody(requestBody);
+    const result = await promptManager.getPromptVersionWithBody({
+      promptVersionId: requestBody.promptVersionId,
+      includePromptBody: false,
+    });
     if (result.error || !result.data) {
       this.setStatus(500);
     } else {
@@ -281,7 +333,11 @@ export class Prompt2025Controller extends Controller {
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<Prompt2025Version, string>> {
     const promptManager = new Prompt2025Manager(request.authParams);
-    const result = await promptManager.getPromptVersionWithBodyByEnvironment(requestBody);
+    const result = await promptManager.getPromptVersionWithBodyByEnvironment({
+      promptId: requestBody.promptId,
+      environment: requestBody.environment,
+      includePromptBody: false,
+    });
     if (result.error || !result.data) {
       this.setStatus(500);
     } else {
@@ -319,7 +375,10 @@ export class Prompt2025Controller extends Controller {
     @Request() request: JawnAuthenticatedRequest
   ): Promise<Result<Prompt2025Version, string>> {
     const promptManager = new Prompt2025Manager(request.authParams);
-    const result = await promptManager.getPromptProductionVersion(requestBody);
+    const result = await promptManager.getPromptProductionVersion({
+      promptId: requestBody.promptId,
+      includePromptBody: false,
+    });
     if (result.error || !result.data) {
       this.setStatus(500);
     } else {
@@ -340,6 +399,102 @@ export class Prompt2025Controller extends Controller {
     const promptManager = new Prompt2025Manager(request.authParams);
 
     const result = await promptManager.getPromptVersionCounts(requestBody);
+    if (result.error || !result.data) {
+      this.setStatus(500);
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+
+  /**
+   * Get the full prompt body (messages, tools, etc.) for a specific prompt version.
+   */
+  @Get("{promptVersionId}/prompt-body")
+  public async getPrompt2025VersionBody(
+    @Path() promptVersionId: string,
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<Prompt2025Version["prompt_body"], string>> {
+    const promptManager = new Prompt2025Manager(request.authParams);
+    const result = await promptManager.getPromptBody({ promptVersionId });
+    if (result.error || !result.data) {
+      if (result.error === "Prompt version not found") {
+        this.setStatus(404);
+      } else {
+        this.setStatus(500);
+      }
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+}
+
+/**
+ * V2 Prompt Controller - Includes full prompt body (messages, tools, etc.) in version responses.
+ * Use these endpoints when you need the complete prompt content instead of just metadata.
+ */
+@Route("v2/prompt-2025")
+@Tags("Prompt2025V2")
+@Security("api_key")
+export class Prompt2025V2Controller extends Controller {
+  @Post("query/version")
+  public async getPrompt2025Version(
+    @Body()
+    requestBody: {
+      promptVersionId: string;
+    },
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<Prompt2025Version, string>> {
+    const promptManager = new Prompt2025Manager(request.authParams);
+    const result = await promptManager.getPromptVersionWithBody({
+      promptVersionId: requestBody.promptVersionId,
+      includePromptBody: true,
+    });
+    if (result.error || !result.data) {
+      this.setStatus(500);
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+
+  @Post("query/environment-version")
+  public async getPrompt2025EnvironmentVersion(
+    @Body()
+    requestBody: {
+      promptId: string;
+      environment: string;
+    },
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<Prompt2025Version, string>> {
+    const promptManager = new Prompt2025Manager(request.authParams);
+    const result = await promptManager.getPromptVersionWithBodyByEnvironment({
+      promptId: requestBody.promptId,
+      environment: requestBody.environment,
+      includePromptBody: true,
+    });
+    if (result.error || !result.data) {
+      this.setStatus(500);
+    } else {
+      this.setStatus(200);
+    }
+    return result;
+  }
+
+  @Post("query/production-version")
+  public async getPrompt2025ProductionVersion(
+    @Body()
+    requestBody: {
+      promptId: string;
+    },
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<Prompt2025Version, string>> {
+    const promptManager = new Prompt2025Manager(request.authParams);
+    const result = await promptManager.getPromptProductionVersion({
+      promptId: requestBody.promptId,
+      includePromptBody: true,
+    });
     if (result.error || !result.data) {
       this.setStatus(500);
     } else {

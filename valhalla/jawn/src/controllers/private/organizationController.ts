@@ -29,6 +29,11 @@ import { Database } from "../../lib/db/database.types";
 import { RequestWrapper } from "../../lib/requestWrapper";
 import { Request as ExpressRequest } from "express";
 import { getHeliconeAuthClient } from "../../packages/common/auth/server/AuthClientFactory";
+import { KVCache } from "../../lib/cache/kvCache";
+import { cacheResultCustom } from "../../utils/cacheResult";
+import { dbQueryClickhouse } from "../../lib/shared/db/dbExecute";
+
+const kvCache = new KVCache(12 * 60 * 60 * 1000);
 
 @Route("v1/organization")
 @Tags("Organization")
@@ -86,6 +91,54 @@ export class OrganizationController extends Controller {
     return ok(result.data!);
   }
 
+  // NOTE: This endpoint MUST be defined BEFORE /{organizationId} to avoid route matching issues
+  @Get("/models")
+  public async getModels(@Request() request: JawnAuthenticatedRequest): Promise<
+    Result<
+      {
+        model: string;
+      }[],
+      string
+    >
+  > {
+    const result = await cacheResultCustom(
+      "v1/organization/models" + JSON.stringify(request.authParams),
+      async () => {
+        // Use 90 days instead of full table scan to improve performance
+        // for large organizations with millions of requests
+        const result = await dbQueryClickhouse<{
+          model: string;
+          count: number;
+        }>(
+          `
+          SELECT
+          model,
+          count() as count
+          FROM request_response_rmt
+          WHERE organization_id = {val_0: UUID}
+            AND request_created_at >= now() - INTERVAL 90 DAY
+          GROUP BY model
+          ORDER BY count() DESC
+          LIMIT 100
+          `,
+          [request.authParams.organizationId]
+        );
+        return ok(result);
+      },
+      kvCache
+    );
+
+    if (result.error || !result.data) {
+      this.setStatus(500);
+      return err(
+        JSON.stringify(result.error) || "Failed to fetch models"
+      );
+    } else {
+      this.setStatus(200);
+      return ok(result.data.data?.map((r) => ({ model: r.model })) ?? []);
+    }
+  }
+
   @Get("/{organizationId}")
   public async getOrganization(
     @Path() organizationId: string,
@@ -122,6 +175,27 @@ export class OrganizationController extends Controller {
     @Path() resellerId: string,
     @Request() request: JawnAuthenticatedRequest
   ) {
+    // Verify the requesting user's organization is the reseller
+    const orgId = request.authParams.organizationId;
+    const resellerCheck = await dbExecute<{ reseller_id: string }>(
+      `SELECT reseller_id FROM organization WHERE id = $1 AND soft_delete = false`,
+      [orgId]
+    );
+    if (
+      !resellerCheck.data?.length ||
+      resellerCheck.data[0].reseller_id !== resellerId
+    ) {
+      // Only allow access if the user's org is the reseller org itself
+      const isReseller = await dbExecute<{ id: string }>(
+        `SELECT id FROM organization WHERE id = $1 AND reseller_id = $2 AND soft_delete = false`,
+        [orgId, resellerId]
+      );
+      if (!isReseller.data?.length) {
+        this.setStatus(403);
+        return err("Not authorized to access this reseller's organizations");
+      }
+    }
+
     const result = await dbExecute<
       Database["public"]["Tables"]["organization"]["Row"]
     >(
@@ -232,23 +306,28 @@ export class OrganizationController extends Controller {
     }
 
     // Check if user is already a member
-    const members = await organizationManager.getOrganizationMembers(
-      organizationId
-    );
+    const members =
+      await organizationManager.getOrganizationMembers(organizationId);
     if (members.error) {
       return err(`Error checking existing members: ${members.error}`);
     }
 
     const isExistingMember = members.data?.some(
-      (member) => member.email?.toLowerCase() === requestBody.email.toLowerCase()
+      (member) =>
+        member.email?.toLowerCase() === requestBody.email.toLowerCase()
     );
 
     if (isExistingMember) {
       return ok(null); // Silently succeed if member already exists
     }
 
-    if (org.data.tier === "enterprise" || org.data.tier === "team-20250130") {
-      // Enterprise tier: Proceed to add member without additional checks
+    if (
+      org.data.tier === "enterprise" ||
+      org.data.tier === "team-20250130" ||
+      org.data.tier === "team-20251210" ||
+      org.data.tier === "pro-20251210"
+    ) {
+      // Enterprise, Team, and new Pro tiers: Proceed to add member without additional checks (unlimited seats)
     } else if (
       org.data.tier === "pro-20240913" ||
       org.data.tier === "pro-20250202"
@@ -400,9 +479,8 @@ export class OrganizationController extends Controller {
   ): Promise<Result<OrganizationMember[], string>> {
     const organizationManager = new OrganizationManager(request.authParams);
 
-    const result = await organizationManager.getOrganizationMembers(
-      organizationId
-    );
+    const result =
+      await organizationManager.getOrganizationMembers(organizationId);
     if (result.error || !result.data) {
       this.setStatus(500);
       return err(result.error ?? "Error getting organization members");
@@ -435,6 +513,28 @@ export class OrganizationController extends Controller {
     }
   }
 
+  @Post("/{organizationId}/update_owner")
+  public async updateOrganizationOwner(
+    @Body()
+    requestBody: { memberId: string },
+    @Path() organizationId: string,
+    @Request() request: JawnAuthenticatedRequest
+  ): Promise<Result<null, string>> {
+    const organizationManager = new OrganizationManager(request.authParams);
+
+    const result = await organizationManager.updateOwner(
+      organizationId,
+      requestBody.memberId
+    );
+    if (result.error || !result.data) {
+      this.setStatus(500);
+      return err(result.error ?? "Error updating organization owner");
+    } else {
+      this.setStatus(201);
+      return ok(null);
+    }
+  }
+
   @Get("/{organizationId}/owner")
   public async getOrganizationOwner(
     @Path() organizationId: string,
@@ -442,9 +542,8 @@ export class OrganizationController extends Controller {
   ): Promise<Result<OrganizationOwner[], string>> {
     const organizationManager = new OrganizationManager(request.authParams);
 
-    const result = await organizationManager.getOrganizationOwner(
-      organizationId
-    );
+    const result =
+      await organizationManager.getOrganizationOwner(organizationId);
     if (result.error || !result.data) {
       this.setStatus(500);
       return err(result.error ?? "Error getting organization owner");
@@ -477,8 +576,11 @@ export class OrganizationController extends Controller {
       memberCount.data > 0 &&
       org.data.tier != "free" &&
       org.data.tier != "team-20250130" &&
+      org.data.tier != "team-20251210" &&
+      org.data.tier != "pro-20251210" &&
       org.data.tier != "enterprise"
     ) {
+      // Only update seat count for legacy per-seat tiers
       const userCount = await stripeManager.updateProUserCount(
         memberCount.data - 1
       );

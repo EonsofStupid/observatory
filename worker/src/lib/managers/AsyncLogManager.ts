@@ -31,7 +31,7 @@ export async function logAsync(
   ctx: ExecutionContext,
   provider: Provider
 ): Promise<Response> {
-  const asyncLogModel = await requestWrapper.getJson<AsyncLogModel>();
+  const asyncLogModel = await requestWrapper.unsafeGetJson<AsyncLogModel>();
   // if payload is larger than 10MB, return 400
   const MAX_PAYLOAD_SIZE = 10 * 1024 * 1024;
   if (JSON.stringify(asyncLogModel).length > MAX_PAYLOAD_SIZE) {
@@ -88,18 +88,6 @@ export async function logAsync(
       clickhouse: new ClickhouseClientWrapper(env),
       supabase: supabase,
       dbWrapper: new DBWrapper(env, auth),
-      queue: new RequestResponseStore(
-        createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY),
-        new DBQueryTimer(ctx, {
-          enabled: (env.DATADOG_ENABLED ?? "false") === "true",
-          apiKey: env.DATADOG_API_KEY,
-          endpoint: env.DATADOG_ENDPOINT,
-        }),
-        new Valhalla(env.VALHALLA_URL, auth),
-        new ClickhouseClientWrapper(env),
-        env.FALLBACK_QUEUE,
-        env.REQUEST_AND_RESPONSE_QUEUE_KV
-      ),
       requestResponseManager: new RequestResponseManager(
         new S3Client(
           env.S3_ACCESS_KEY ?? "",
@@ -107,8 +95,7 @@ export async function logAsync(
           env.S3_ENDPOINT ?? "",
           env.S3_BUCKET_NAME ?? "",
           env.S3_REGION ?? "us-west-2"
-        ),
-        createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY)
+        )
       ),
       producer: new HeliconeProducer(env),
     },

@@ -1,4 +1,4 @@
-import { ProviderName } from "../../../providers";
+import { ModelProviderName } from "../../../providers";
 import type { ModelProviderConfig } from "../../../types";
 import { Claude35SonnetV2ModelName } from "./model";
 
@@ -6,16 +6,20 @@ export const endpoints = {
   "claude-3.5-sonnet-v2:anthropic": {
     providerModelId: "claude-3-5-sonnet-20241022",
     provider: "anthropic",
-    pricing: {
-      prompt: 0.000003,
-      completion: 0.000015,
-      cacheRead: 0.0000003,
-      cacheWrite: {
-        "5m": 0.00000375,
-        "1h": 0.000006,
-        default: 0.00000375,
+    author: "anthropic",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000003,
+        output: 0.000015,
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+          write1h: 2.0,
+        },
       },
-    },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 8192,
     supportedParameters: [
@@ -27,7 +31,9 @@ export const endpoints = {
       "top_k",
       "stop",
     ],
+    supportedPlugins: ["web"],
     ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
     endpointConfigs: {
       "*": {},
     },
@@ -35,13 +41,21 @@ export const endpoints = {
   "claude-3.5-sonnet-v2:vertex": {
     providerModelId: "claude-3-5-sonnet-v2@20241022",
     provider: "vertex",
+    author: "anthropic",
     version: "vertex-2023-10-16",
-    pricing: {
-      prompt: 0.000003,
-      completion: 0.000015,
-      cacheRead: 0.0000003,
-      cacheWrite: 0.00000375,
-    },
+    crossRegion: true,
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000003,
+        output: 0.000015,
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+        },
+      },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 8192,
     supportedParameters: [
@@ -54,6 +68,7 @@ export const endpoints = {
       "stop",
     ],
     ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
     endpointConfigs: {
       global: {
         providerModelId: "claude-3-5-sonnet-v2@20241022",
@@ -62,15 +77,22 @@ export const endpoints = {
   },
   "claude-3.5-sonnet-v2:bedrock": {
     provider: "bedrock",
+    author: "anthropic",
     providerModelId: "anthropic.claude-3-5-sonnet-20241022-v2:0",
     version: "20241022",
     crossRegion: true,
-    pricing: {
-      prompt: 0.000003,
-      completion: 0.000015,
-      cacheRead: 0.0000003,
-      cacheWrite: 0.00000375,
-    },
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000003,
+        output: 0.000015,
+        web_search: 0.01, // $10 per 1000 searches (1:1 USD; 10/1K)
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+        },
+      },
+    ],
     contextLength: 200000,
     maxCompletionTokens: 8192,
     supportedParameters: [
@@ -83,10 +105,74 @@ export const endpoints = {
       "stop",
     ],
     ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
     endpointConfigs: {
       "us-east-1": {},
     },
   },
+  "claude-3.5-sonnet-v2:openrouter": {
+    provider: "openrouter",
+    author: "anthropic",
+    providerModelId: "anthropic/claude-3.5-sonnet",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000003165, // $3.17/1M - worst-case: $3.00/1M (Anthropic/Amazon Bedrock) * 1.055
+        output: 0.00001583, // $15.83/1M - worst-case: $15.00/1M (Anthropic/Amazon Bedrock) * 1.055,
+      },
+    ],
+    contextLength: 200000,
+    maxCompletionTokens: 8192,
+    supportedParameters: [
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "top_k",
+      "stop",
+      "tools",
+      "tool_choice",
+    ],
+    ptbEnabled: true,
+    endpointConfigs: {
+      "*": {},
+    },
+  },
+  "claude-3.5-sonnet-v2:helicone": {
+    provider: "helicone",
+    author: "anthropic",
+    providerModelId: "pa/cd-3-5-st-20241022",
+    pricing: [
+      {
+        threshold: 0,
+        input: 0.000003,
+        output: 0.000015,
+        cacheMultipliers: {
+          cachedInput: 0.1,
+          write5m: 1.25,
+          write1h: 2.0,
+        },
+      },
+    ],
+    contextLength: 200000,
+    maxCompletionTokens: 8192,
+    supportedParameters: [
+      "tools",
+      "tool_choice",
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "top_k",
+      "stop",
+    ],
+    ptbEnabled: true,
+    responseFormat: "ANTHROPIC",
+    endpointConfigs: {
+      "*": {},
+    },
+  },
 } satisfies Partial<
-  Record<`${Claude35SonnetV2ModelName}:${ProviderName}`, ModelProviderConfig>
+  Record<
+    `${Claude35SonnetV2ModelName}:${ModelProviderName}`,
+    ModelProviderConfig
+  >
 >;

@@ -22,7 +22,7 @@ export type RateLimitPolicy = {
   segment: string | undefined;
 };
 
-const RATE_LIMIT_CACHE_TTL = 120; // 2 minutes
+const RATE_LIMIT_CACHE_TTL = 43200; // 12 hours
 
 async function getHeliconeApiKeyRow(
   dbClient: SupabaseClient<Database>,
@@ -154,7 +154,10 @@ export class DBWrapper {
   private authParams?: AuthParams;
   private tier?: string;
 
-  constructor(private env: Env, private auth: HeliconeAuth) {
+  constructor(
+    private env: Env,
+    private auth: HeliconeAuth
+  ) {
     this.supabaseClient = createClient(
       env.SUPABASE_URL,
       env.SUPABASE_SERVICE_ROLE_KEY
@@ -231,10 +234,18 @@ export class DBWrapper {
       accessDict: {
         cache: true,
       },
+      metaData: {
+        allowNegativeBalance: org.data.allow_negative_balance,
+        creditLimit: org.data.credit_limit,
+      },
     });
   }
 
   async getAuthParams(): Promise<Result<AuthParams, string>> {
+    if (this.env.ENVIRONMENT === "development") {
+      return this._getAuthParams();
+    }
+
     if (this.authParams !== undefined) {
       return ok(this.authParams);
     }
@@ -242,9 +253,9 @@ export class DBWrapper {
     const authParams = await getAndStoreInCache(
       `authParams3-${cacheKey}`,
       this.env,
-      async () => await this._getAuthParams()
+      async () => await this._getAuthParams(),
+      43200 // 12 hours
     );
-
     if (!authParams || authParams.error || !authParams.data) {
       return err(authParams?.error || "Invalid authentication.");
     }
@@ -299,6 +310,7 @@ export class DBWrapper {
         tier: string;
         id: string;
         percentLog: number;
+        freeLimitExceeded: string | null; // YYYY-MM format or null
       },
       string
     >
@@ -312,10 +324,11 @@ export class DBWrapper {
         tier: string;
         id: string;
         percentLog: number;
+        freeLimitExceeded: string | null;
       },
       string
     >(
-      `org-${authParams.data.organizationId}`,
+      `org-v3-${authParams.data.organizationId}`, // Bumped cache key version for type change
       this.secureCacheEnv,
       async () => {
         const { data, error } = await this.supabaseClient
@@ -331,8 +344,12 @@ export class DBWrapper {
           tier: data?.tier ?? "free",
           id: data?.id ?? "",
           percentLog: data?.percent_to_log ?? 100_000,
+          freeLimitExceeded:
+            (data as { free_limit_exceeded?: string | null })?.free_limit_exceeded ??
+            null,
         });
-      }
+      },
+      600 // 10 minutes - shorter TTL so freeLimitExceeded flag updates quickly after upgrade
     );
   }
 
@@ -389,24 +406,6 @@ export class DBWrapper {
       })
       .eq("org_id", await this.orgId())
       .single();
-    if (error) {
-      return { data: null, error: error.message };
-    }
-    return { data: data, error: null };
-  }
-
-  async getRequestById(
-    requestId: string
-  ): Promise<Result<Database["public"]["Tables"]["request"]["Row"], string>> {
-    const { data, error } = await this.supabaseClient
-      .from("request")
-      .select("*")
-      .match({
-        id: requestId,
-      })
-      .eq("helicone_org_id", await this.orgId())
-      .single();
-
     if (error) {
       return { data: null, error: error.message };
     }

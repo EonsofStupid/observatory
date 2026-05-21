@@ -15,6 +15,7 @@ import {
 } from "../../lib/clients/jawn";
 import { ORG_ID_COOKIE_KEY } from "../../lib/constants";
 import { OnboardingState } from "./useOrgOnboarding";
+import { getAttributionForPostHog } from "@helicone-package/common";
 
 const useGetOrgMembers = (orgId: string) => {
   const { data, isLoading, refetch } = $JAWN_API.useQuery(
@@ -132,10 +133,17 @@ const identifyUserOrg = (
   user: HeliconeUser,
 ) => {
   if (user) {
+    // Identify user
     posthog.identify(user.id, {
       name: user.user_metadata?.name,
       email: user.email,
     });
+
+    // Set attribution as $set_once (first-touch - won't overwrite existing values)
+    const attributionProps = getAttributionForPostHog({ omitUndefined: true });
+    if (Object.keys(attributionProps).length > 0) {
+      posthog.setPersonProperties({}, attributionProps);
+    }
   }
 
   const orgOnboardingStatus = org.onboarding_status as unknown as OnboardingState;
@@ -177,40 +185,12 @@ const useAddOrgMemberMutation = () => {
   const queryClient = useQueryClient();
   const { setNotification } = useNotification();
   
-  return useMutation({
-    mutationFn: async ({
-      orgId,
-      email,
-    }: {
-      orgId: string;
-      email: string;
-    }) => {
-      const jawn = getJawnClient(orgId);
-      const { data, error } = await jawn.POST(
-        "/v1/organization/{organizationId}/add_member",
-        {
-          params: {
-            path: {
-              organizationId: orgId,
-            },
-          },
-          body: {
-            email,
-          },
-        },
-      );
-
-      if (error || data?.error) {
-        throw new Error(data?.error ? JSON.stringify(data.error) : String(error));
-      }
-
-      return data;
-    },
-    onSuccess: (_, variables) => {
+  return $JAWN_API.useMutation("post", "/v1/organization/{organizationId}/add_member", {
+    onSuccess: (_data, variables) => {
       setNotification("Member added successfully", "success");
       
       queryClient.invalidateQueries({
-        queryKey: ["get", "/v1/organization/{organizationId}/members", { params: { path: { organizationId: variables.orgId } } }],
+        queryKey: ["get", "/v1/organization/{organizationId}/members", { params: { path: { organizationId: variables.params.path.organizationId } } }],
       });
       
       queryClient.invalidateQueries({
@@ -226,10 +206,7 @@ const useAddOrgMemberMutation = () => {
       });
     },
     onError: (error) => {
-      setNotification(
-        error instanceof Error ? error.message : "Failed to add member",
-        "error"
-      );
+      setNotification("Failed to add member", "error");
     },
   });
 };
@@ -245,12 +222,14 @@ export const useUpdateOrgMutation = () => {
       color,
       icon,
       variant,
+      default_time_filter,
     }: {
       orgId: string;
       name: string;
       color: string;
       icon: string;
       variant: string;
+      default_time_filter?: string;
       orgProviderKey?: string;
       limits?: any;
       organizationType?: string;
@@ -265,6 +244,7 @@ export const useUpdateOrgMutation = () => {
             color,
             icon,
             variant,
+            default_time_filter,
           },
         },
       );

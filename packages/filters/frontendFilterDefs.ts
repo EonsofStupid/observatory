@@ -290,6 +290,8 @@ export const REQUEST_TABLE_FILTERS: [
   SingleFilterDef<"request_response_rmt">,
   SingleFilterDef<"request_response_rmt">,
   SingleFilterDef<"request_response_rmt">,
+  SingleFilterDef<"request_response_rmt">,
+  SingleFilterDef<"request_response_rmt">,
   SingleFilterDef<"request_response_rmt">
 ] = [
   {
@@ -349,6 +351,13 @@ export const REQUEST_TABLE_FILTERS: [
     category: "request",
   },
   {
+    label: "Provider",
+    operators: textOperators,
+    table: "request_response_rmt",
+    column: "provider",
+    category: "request",
+  },
+  {
     label: "Status",
     operators: STATUS_OPS,
     category: "response",
@@ -368,5 +377,12 @@ export const REQUEST_TABLE_FILTERS: [
     table: "request_response_rmt",
     column: "helicone-score-feedback",
     category: "feedback",
+  },
+  {
+    label: "AI Gateway",
+    operators: booleanOperators,
+    table: "request_response_rmt",
+    column: "request_referrer",
+    category: "request",
   },
 ];

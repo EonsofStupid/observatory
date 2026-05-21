@@ -1,6 +1,6 @@
 import { Json } from "../../lib/db/database.types";
 import { AuthParams } from "../../packages/common/auth/types";
-import { dbExecute } from "../../lib/shared/db/dbExecute";
+import { dbExecute, dbQueryClickhouse } from "../../lib/shared/db/dbExecute";
 import { S3Client } from "../../lib/shared/db/s3Client";
 import {
   Result,
@@ -39,12 +39,23 @@ export class HeliconeDatasetManager extends BaseManager {
   constructor(authParams: AuthParams) {
     super(authParams);
     this.s3Client = new S3Client(
-      process.env.S3_ACCESS_KEY ?? "",
-      process.env.S3_SECRET_KEY ?? "",
+      process.env.S3_ACCESS_KEY || undefined,
+      process.env.S3_SECRET_KEY || undefined,
       process.env.S3_ENDPOINT_PUBLIC ?? process.env.S3_ENDPOINT ?? "",
       process.env.S3_BUCKET_NAME ?? "",
       (process.env.S3_REGION as "us-west-2" | "eu-west-1") ?? "us-west-2"
     );
+  }
+
+  private async getTodayRowCount(): Promise<number> {
+    const result = await dbExecute<{ count: number }>(
+      `SELECT COUNT(*)::int as count
+       FROM helicone_dataset_row
+       WHERE organization_id = $1
+         AND created_at >= CURRENT_DATE`,
+      [this.authParams.organizationId]
+    );
+    return result.data?.[0]?.count ?? 0;
   }
 
   async getDatasets(params: {
@@ -97,6 +108,8 @@ export class HeliconeDatasetManager extends BaseManager {
   }
 
   async query(datasetId: string, params: { offset: number; limit: number }) {
+    const limit = Math.max(1, Math.min(Math.floor(Number(params.limit) || 50), 10000));
+    const offset = Math.max(0, Math.floor(Number(params.offset) || 0));
     const query = `
       SELECT 
         hdr.id,
@@ -109,8 +122,8 @@ export class HeliconeDatasetManager extends BaseManager {
       AND hdr.organization_id = $2
       AND hd.deleted_at IS NULL
       ORDER BY hdr.created_at DESC
-      LIMIT ${params.limit}
-      OFFSET ${params.offset}
+      LIMIT ${limit}
+      OFFSET ${offset}
     `;
 
     const result = await dbExecute<HeliconeDatasetRow>(query, [
@@ -205,6 +218,16 @@ export class HeliconeDatasetManager extends BaseManager {
     datasetId: string,
     addRequests: string[]
   ): Promise<Result<null, string>> {
+    // Rate limit: 1000 rows per day per organization
+    const todayCount = await this.getTodayRowCount();
+    if (todayCount + addRequests.length > 1000) {
+      return err(
+        `Rate limit exceeded: You can add up to 1000 dataset rows per day. ` +
+          `Today's usage: ${todayCount}. Requested: ${addRequests.length}. ` +
+          `Limit resets at midnight UTC.`
+      );
+    }
+
     try {
       // Build the VALUES part of the query dynamically
       const values = addRequests
@@ -243,7 +266,20 @@ export class HeliconeDatasetManager extends BaseManager {
             row.id,
             this.authParams.organizationId
           );
-          return await this.s3Client.copyObject(key, newKey);
+
+          // Try to copy from S3 first
+          const copyResult = await this.s3Client.copyObject(key, newKey);
+
+          // If copy fails (e.g., source doesn't exist), try to fetch from ClickHouse and store directly
+          if (copyResult.error) {
+            const fallbackResult = await this.fetchAndStoreRequestBody(
+              row.origin_request_id,
+              newKey
+            );
+            return fallbackResult;
+          }
+
+          return copyResult;
         })
       );
 
@@ -254,6 +290,57 @@ export class HeliconeDatasetManager extends BaseManager {
       return ok(null);
     } catch (error) {
       return err(`Failed to add requests to dataset: ${error}`);
+    }
+  }
+
+  /**
+   * Fetches request/response body from ClickHouse and stores it in S3
+   * Used as a fallback when the source S3 object doesn't exist
+   */
+  private async fetchAndStoreRequestBody(
+    requestId: string,
+    destinationKey: string
+  ): Promise<Result<string, string>> {
+    try {
+      // Fetch the request/response body from ClickHouse
+      const query = `
+        SELECT
+          request_body,
+          response_body
+        FROM request_response_rmt
+        WHERE request_id = {val_0: String}
+        AND organization_id = {val_1: String}
+        LIMIT 1
+      `;
+
+      const result = await dbQueryClickhouse<{
+        request_body: string;
+        response_body: string;
+      }>(query, [requestId, this.authParams.organizationId]);
+
+      if (result.error || !result.data || result.data.length === 0) {
+        return err(
+          `Request body not found in ClickHouse for request ${requestId}`
+        );
+      }
+
+      const { request_body, response_body } = result.data[0];
+
+      // Store the body in S3 at the dataset location
+      const bodyData = JSON.stringify({
+        request: request_body ? JSON.parse(request_body) : {},
+        response: response_body ? JSON.parse(response_body) : {},
+      });
+
+      const storeResult = await this.s3Client.store(destinationKey, bodyData);
+
+      if (storeResult.error) {
+        return err(`Failed to store request body: ${storeResult.error}`);
+      }
+
+      return ok("Success");
+    } catch (error) {
+      return err(`Failed to fetch and store request body: ${error}`);
     }
   }
 
@@ -298,6 +385,63 @@ export class HeliconeDatasetManager extends BaseManager {
     } catch (error) {
       return err(`Failed to remove requests from dataset: ${error}`);
     }
+  }
+
+  async createDataset(params: {
+    name: string;
+    meta?: Record<string, any>;
+  }): Promise<Result<string, string>> {
+    try {
+      const sql = `
+        INSERT INTO helicone_dataset (name, organization, dataset_type, meta)
+        VALUES ($1, $2, 'helicone', $3)
+        RETURNING id
+      `;
+
+      const result = await dbExecute<{ id: string }>(sql, [
+        params.name,
+        this.authParams.organizationId,
+        params.meta ? JSON.stringify(params.meta) : null,
+      ]);
+
+      if (result.error || !result.data || result.data.length === 0) {
+        return err(result.error ?? "Failed to create dataset");
+      }
+
+      return ok(result.data[0].id);
+    } catch (error) {
+      return err(`Error creating dataset: ${error}`);
+    }
+  }
+
+  async createDatasetWithRequests(params: {
+    name: string;
+    requestIds: string[];
+    meta?: Record<string, any>;
+  }): Promise<Result<string, string>> {
+    // First create the dataset
+    const datasetResult = await this.createDataset({
+      name: params.name,
+      meta: params.meta,
+    });
+
+    if (datasetResult.error || !datasetResult.data) {
+      return datasetResult;
+    }
+
+    const datasetId = datasetResult.data;
+
+    // If there are request IDs, add them to the dataset
+    if (params.requestIds && params.requestIds.length > 0) {
+      const addResult = await this.addRequests(datasetId, params.requestIds);
+      if (addResult.error) {
+        // If adding requests fails, we should clean up the dataset
+        await this.deleteDataset(datasetId);
+        return err(addResult.error);
+      }
+    }
+
+    return ok(datasetId);
   }
 
   async deleteDataset(datasetId: string): Promise<Result<null, string>> {

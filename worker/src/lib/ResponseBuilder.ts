@@ -1,7 +1,4 @@
-import {
-  RateLimitOptions,
-  RateLimitResponse,
-} from "./clients/DurableObjectRateLimiterClient";
+import { RateLimitHeaders } from "./rate-limit/bucketClient";
 
 export interface BuildParams {
   body: BodyInit | null;
@@ -17,24 +14,11 @@ export class ResponseBuilder {
     return this;
   }
 
-  addRateLimitHeaders(
-    rateLimitCheckResult: RateLimitResponse,
-    rateLimitOptions: RateLimitOptions
-  ): void {
-    const policy = `${rateLimitOptions.quota};w=${rateLimitOptions.time_window};u=${rateLimitOptions.unit}`;
-    const headers: { [key: string]: string } = {
-      "Helicone-RateLimit-Limit": rateLimitCheckResult.limit.toString(),
-      "Helicone-RateLimit-Remaining": rateLimitCheckResult.remaining.toString(),
-      "Helicone-RateLimit-Policy": policy,
-    };
-
-    if (rateLimitCheckResult.reset !== undefined) {
-      headers["Helicone-RateLimit-Reset"] =
-        rateLimitCheckResult.reset.toString();
-    }
-
+  addTokenBucketRateLimitHeaders(headers: RateLimitHeaders): void {
     Object.entries(headers).forEach(([key, value]) => {
-      this.setHeader(key, value);
+      if (value) {
+        this.setHeader(key, value);
+      }
     });
   }
 
@@ -48,7 +32,6 @@ export class ResponseBuilder {
       headers.set(key, value);
     });
     if (status < 200 || status >= 600) {
-      console.log("Invalid status code:", status);
       status = 500;
     }
 
@@ -63,6 +46,8 @@ export class ResponseBuilder {
 
   buildRateLimitedResponse(): Response {
     this.setHeader("content-type", "application/json;charset=UTF-8");
+    // Mark as a Helicone-generated rate limit for upstream logic
+    this.setHeader("X-Helicone-Error", "rate_limited");
 
     return this.build({
       body: JSON.stringify({
