@@ -52,7 +52,7 @@ export interface HeliconeAuthClient {
     provider,
     options,
   }: {
-    provider: "google" | "github";
+    provider: "google" | "github" | "authentik";
     options?: { redirectTo?: string };
   }) => Promise<Result<void, string>>;
 
